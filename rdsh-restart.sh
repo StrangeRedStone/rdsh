@@ -115,7 +115,7 @@ while [ $# -gt 0 ]; do
     --delay)      shift; DELAY="${1:-3}" ;;
     --timeout)    shift; TIMEOUT="${1:-30}" ;;
     --port)       shift; PORT="${1:-3080}" ;;
-    -h|--help)    sed -n '2,45p' "$SELF"; exit 0 ;;
+    -h|--help)    sed -n '2,/^# =\{20,\}$/p' "$SELF"; exit 0 ;;
     --)           shift; TARGET="${1:-}"; break ;;
     -*)           die "未知参数：$1（--help 看用法）" ;;
     *)            TARGET="$1" ;;

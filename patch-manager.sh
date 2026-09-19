@@ -38,6 +38,11 @@
 set -u
 
 SELF="$(readlink -f "$0")"
+
+# --help/-h 必须在这里短路：它会被下一行当成 MODE 消费掉，从而走到「解析补丁清单」
+# 那一步 —— 干净环境（尚无补丁仓）下会直接 die，根本看不到用法。
+case "${1:-}" in -h|--help) sed -n '2,/^# =\{20,\}$/p' "$SELF"; exit 0 ;; esac
+
 MODE="${1:-}"; shift || true
 
 REPO=""; PATCHES=""; SET=""; DRY=0; YES=0; BUILD=1; NOTE=""
@@ -49,7 +54,7 @@ while [ $# -gt 0 ]; do
     --dry-run|-n) DRY=1 ;;
     --yes|-y) YES=1 ;;
     --no-build) BUILD=0 ;;
-    -h|--help) sed -n '2,45p' "$SELF"; exit 0 ;;
+    -h|--help) sed -n '2,/^# =\{20,\}$/p' "$SELF"; exit 0 ;;
     -*) printf '未知参数：%s\n' "$1" >&2; exit 1 ;;
     *) SET="$1" ;;
   esac
@@ -340,7 +345,7 @@ case "$MODE" in
   apply)  [ "$DRY" = "1" ] || [ "$YES" = "1" ] || die "apply 会改检出：请加 --yes 确认，或先看 --dry-run/status" ; cmd_apply ;;
   revert) [ "$DRY" = "1" ] || [ "$YES" = "1" ] || die "revert 会改检出：请加 --yes 确认，或先看 --dry-run/status" ; cmd_revert ;;
   export) cmd_export ;;
-  ""|-h|--help) sed -n '2,45p' "$SELF" ;;
+  ""|-h|--help) sed -n '2,/^# =\{20,\}$/p' "$SELF" ;;
   *) die "未知子命令：$MODE（可用：list/status/apply/revert/export）" ;;
 esac
 rc=$?

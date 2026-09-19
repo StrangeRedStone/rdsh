@@ -19,21 +19,29 @@ jobs:
             echo "ok  $f"
           done
 
-      - name: --help 冒烟（每个脚本都应 0 退出并打出用法）
+      - name: --help 冒烟（每个脚本都应在干净 HOME 下 0 退出并打出用法）
         run: |
           set -e
           for f in *.sh; do
-            out="$(bash "$f" --help 2>&1)" || { echo "FAIL $f --help"; echo "$out"; exit 1; }
+            out="$(HOME="$(mktemp -d)" bash "$f" --help 2>&1)" || { echo "FAIL $f --help"; printf '%s\n' "$out"; exit 1; }
             [ -n "$out" ] || { echo "FAIL $f: --help 输出为空"; exit 1; }
             echo "ok  $f --help"
           done
 
   shellcheck:
-    name: shellcheck（咨询性，不阻塞）
+    # 咨询性作业：恒成功。用 runner 自带的 shellcheck，不依赖第三方 action
+    # （原先用 ludeeus/action-shellcheck@master，该标签已失效、作业必失败）。
+    name: shellcheck（咨询性，恒成功）
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: ludeeus/action-shellcheck@master
-        with:
-          severity: warning
+
+      - name: shellcheck（结果仅供参考，不影响 CI 结论）
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y shellcheck
+          fi
+          shellcheck --version
+          shellcheck -S warning *.sh || true
+          echo "（以上为咨询性结果；本作业恒成功）"
