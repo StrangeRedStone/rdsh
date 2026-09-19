@@ -74,9 +74,14 @@ cfg_get() {
 }
 expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
 BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
-[ -n "$PATCHES" ] || PATCHES="$BASE/dsh-patches"
+# 补丁仓与备份根都可覆盖：命令行 --patches > 环境变量 > 配置文件 > $BASE 下的默认位置
+if [ -z "$PATCHES" ]; then
+  PATCHES="$(expand_tilde "${RDSH_PATCHES:-$(cfg_get PATCHES)}")"
+  [ -n "$PATCHES" ] || PATCHES="$BASE/dsh-patches"
+fi
 MANIFEST="$PATCHES/manifest.yaml"
-BACKUP_ROOT="$BASE/.dsh-backup"
+BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"
+[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
 TS="$(date +%Y%m%d-%H%M%S)"
 
 command -v python3 >/dev/null || die "需要 python3 解析 manifest.yaml"
