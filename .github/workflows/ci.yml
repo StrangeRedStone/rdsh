@@ -14,7 +14,7 @@ jobs:
       - name: bash -n（全部脚本）
         run: |
           set -e
-          for f in *.sh; do
+          for f in *.sh tools/*.sh; do
             bash -n "$f"
             echo "ok  $f"
           done
@@ -22,7 +22,7 @@ jobs:
       - name: --help 冒烟（每个脚本都应在干净 HOME 下 0 退出并打出用法）
         run: |
           set -e
-          for f in *.sh; do
+          for f in *.sh tools/*.sh; do
             out="$(HOME="$(mktemp -d)" bash "$f" --help 2>&1)" || { echo "FAIL $f --help"; printf '%s\n' "$out"; exit 1; }
             [ -n "$out" ] || { echo "FAIL $f: --help 输出为空"; exit 1; }
             echo "ok  $f --help"
