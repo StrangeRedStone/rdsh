@@ -1,0 +1,25 @@
+# rdsh 配置文件示例
+# 复制到 ~/.config/rdsh/config 后按需修改。
+#
+# 规则：
+#   * 纯 KEY=VALUE；**不会被 source**，只是取值。
+#   * 优先级：环境变量 > 本文件 > 默认值。
+#   * 值可以写 ~（会展开成 $HOME）。
+#   * 改路径用 `rdsh base <路径>` 更省事（本文件同款写入）。
+
+# ── 单一旋钮 ───────────────────────────────────────────────
+# 决定下面所有默认值的根。默认 $HOME/Mapp。
+BASE=~/Mapp
+
+# ── 逐项覆盖（按需取消注释） ───────────────────────────────
+# MANAGE_ROOT=~/Mapp/dsh          # 检出根（本仓库应在这，与检出同目录）
+# DATA_ROOT=~/Mapp/.dsh           # 每版本数据根
+# BACKUP_ROOT=~/Mapp/.dsh-backup  # 备份与回退基线
+# SHARED_ROOT=~/Mapp/.dsh-shared  # 与版本无关的作者资产（软链共享）
+# LOG_DIR=~/Mapp/.dsh-logs        # 启动日志（含访问 token，注意权限）
+
+# ── 其它 ───────────────────────────────────────────────────
+# RDSH_TRASH=/tmp                 # 「删除」的回收目录，永不 rm
+# RDSH_REMOTE=https://github.com/deepseek-ai/deepseek-harness.git
+# RDSH_TAG_PREFIX=dsh-v           # 远端 tag 命名：dsh-v<版本>
+# RDSH_AUTO_INSTALL=1             # 启动时缺依赖自动 pnpm install

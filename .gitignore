@@ -1,0 +1,22 @@
+# 若本仓库放在 $BASE/dsh，检出会出现在同目录
+deepseek-harness-*/
+deepseek-harness-*
+
+# rdsh 运行期文件
+.map
+.map.bak-*
+*.bak-*
+*.bk
+*.bk.*
+
+# 备份 / 日志 / 回收
+.dsh-backup/
+.dsh-logs/
+dsh-patches/
+dsh-plugins/
+
+# 通用
+node_modules/
+*.log
+*.tmp
+.DS_Store
