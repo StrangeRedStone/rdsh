@@ -43,17 +43,27 @@ jobs:
           echo "ok  可移植性回退生效"
 
   shellcheck:
-    name: shellcheck（咨询性，恒成功）
+    name: shellcheck（error 级阻塞，warning 级咨询）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: shellcheck（结果仅供参考，不影响 CI 结论）
+      - name: 安装 shellcheck
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
             sudo apt-get update -qq
             sudo apt-get install -y shellcheck
           fi
           shellcheck --version
-          shellcheck -S warning *.sh || true
-          echo "（以上为咨询性结果；本作业恒成功）"
+
+      - name: error 级（阻塞）
+        run: |
+          set -e
+          shellcheck -S error -f gcc *.sh tools/*.sh
+          echo "ok  error 级 0 条"
+
+      - name: warning 级（咨询，不阻塞）
+        run: |
+          n=$(shellcheck -S warning -f gcc *.sh tools/*.sh 2>/dev/null | grep -c ":" || true)
+          echo "warning 级 $n 条（不阻塞）。已知误报族：SC2128/SC2178=同名变量各 local；SC1111=中文引号；SC2088=case 模式；SC2209=mode=赋值"
+          shellcheck -S warning -f gcc *.sh tools/*.sh || true
