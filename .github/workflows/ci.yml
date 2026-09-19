@@ -6,7 +6,7 @@ on:
 
 jobs:
   syntax-and-help:
-    name: 语法检查 + --help 冒烟
+    name: 语法检查 + --help 冒烟 + 可移植性
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,9 +28,21 @@ jobs:
             echo "ok  $f --help"
           done
 
+      - name: 可移植性冒烟（未配置时 MANAGE_ROOT 应回退到脚本自身目录）
+        run: |
+          set -e
+          tmp="$(mktemp -d)"
+          out="$(HOME="$tmp" bash ./Rdsh.sh list 2>&1 || true)"
+          echo "--- Rdsh.sh list 输出 ---"
+          echo "$out"
+          echo "--- 当前目录：$(pwd) ---"
+          echo "$out" | grep -qF "$(pwd)" || {
+            echo "FAIL：MANAGE_ROOT 没有回退到脚本自身目录 —— clone 到任意目录后将不可用"
+            exit 1
+          }
+          echo "ok  可移植性回退生效"
+
   shellcheck:
-    # 咨询性作业：恒成功。用 runner 自带的 shellcheck，不依赖第三方 action
-    # （原先用 ludeeus/action-shellcheck@master，该标签已失效、作业必失败）。
     name: shellcheck（咨询性，恒成功）
     runs-on: ubuntu-latest
     steps:

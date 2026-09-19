@@ -52,7 +52,15 @@ for a in "$@"; do
 done
 
 BASE="${BASE_OVERRIDE:-$(cfg_get BASE)}"; [ -n "$BASE" ] || BASE="${RDSH_BASE:-$HOME/Mapp}"
-MANAGE_ROOT="${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}"; [ -n "$MANAGE_ROOT" ] || MANAGE_ROOT="$BASE/dsh"
+MANAGE_ROOT="${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}"
+if [ -z "$MANAGE_ROOT" ]; then
+  MANAGE_ROOT="$BASE/dsh"
+  # 可移植性回退：$BASE/dsh 不是本工具所在处时，改用脚本自身目录（clone 到任意目录也能跑）
+  if [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
+    _self_dir="$(dirname "$(readlink -f "$0")")"
+    if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
+  fi
+fi
 DATA_ROOT="${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}";       [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh"
 BACKUP_ROOT="${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
 CANON="${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}";       [ -n "$CANON" ]       || CANON="$BASE/dsh-plugins"

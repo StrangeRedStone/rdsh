@@ -73,6 +73,12 @@ _shared="$(expand "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"
 _logdir="$(expand "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/dsh}"
+# 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
+# 这样 `git clone` 到任意目录后可直接跑；有既定布局（$BASE/dsh 里有 Rdsh.sh）时行为不变。
+if [ -z "$_manage" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
+  _self_dir="$(dirname "$(readlink -f "$0")")"
+  if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
+fi
 DATA_ROOT="${_data:-$BASE/.dsh}"
 BACKUP_ROOT="${_backup:-$BASE/.dsh-backup}"
 SHARED_ROOT="${_shared:-$BASE/.dsh-shared}"
@@ -145,6 +151,9 @@ collect_entries() {
     base=$(basename "${d%/}")
     [ "$base" = "Rdsh.sh" ] && continue
     [ "$base" = ".map" ] && continue
+    # 只认真正像 dsh 检出的目录：根须有 package.json。
+    # 否则本工具自带的 docs/ examples/ 等目录会被误列成"版本"。
+    [ -f "$d/package.json" ] || continue
     ver=$(read_version "${d%/}")
     data=$(data_home_for_name "$base" "$ver")
     ENTRIES+=("$ver|${d%/}|$base|$data")

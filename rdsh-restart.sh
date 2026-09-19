@@ -65,7 +65,16 @@ cfg_get() {
 expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
 BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
 LOG_DIR="$(expand_tilde "${DSH_RESTART_LOGDIR:-${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}}")"; [ -n "$LOG_DIR" ] || LOG_DIR="$BASE/.dsh-logs"
-RDSH_BIN="$BASE/dsh/Rdsh.sh"
+MANAGE_ROOT="$(expand_tilde "${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}")"
+if [ -z "$MANAGE_ROOT" ]; then
+  MANAGE_ROOT="$BASE/dsh"
+  # 可移植性回退：$BASE/dsh 不是本工具所在处时，改用本脚本所在目录
+  if [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
+    _self_dir="$(dirname "$SELF")"
+    if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
+  fi
+fi
+RDSH_BIN="$MANAGE_ROOT/Rdsh.sh"
 
 # 若被投递到 systemd 单元执行，统一把输出落到日志文件
 if [ -n "${DSH_RESTART_LOG:-}" ]; then
