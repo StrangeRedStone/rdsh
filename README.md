@@ -115,7 +115,7 @@ rdsh start
 
 ## 已知限制（诚实边界）
 
-- **脚本假定自己位于 `$BASE/dsh/`**（与检出同目录）——跨脚本调用按此解析。clone 到别处请相应设置 `RDSH_BASE` / `RDSH_MANAGE_ROOT`。
+- **检出放在 `MANAGE_ROOT` 下**（默认 `$BASE/dsh`）。未显式配置、且 `$BASE/dsh` 不是本工具所在处时，`MANAGE_ROOT` 会回退到**脚本自身目录**——所以 `git clone` 到任意目录后可直接运行，检出也会落在那里（已被 `.gitignore` 忽略）。要换位置用 `rdsh base <路径>` 或设 `RDSH_MANAGE_ROOT`。
 - `plugin-sync` 的方向判断基于 **mtime**，是近似值（`cp -a` 会保留时间、手改会刷新）；更稳的「构建记录」尚未实现。
 - 插件权威副本「谁最新」目前由人（或 `--adopt`）决定，**没有自动构建流水线**。
 - `rdsh fetch` 依赖 GitHub；网络不畅时可能失败（`--list` 有 10 分钟磁盘缓存与 `git ls-remote` 回退）。
