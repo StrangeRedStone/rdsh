@@ -2,6 +2,14 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.2.2 — 2026-09-25
+
+### 变更
+
+- **`rdsh fetch` 默认改为 `git clone --depth 1 --branch <tag>`**（此前默认归档 tarball）。理由：rdsh 的下游能力全都吃 `.git` —— `rdsh patch export` 在无 git 的检出上**直接失败**（`patch-manager.sh` 首句判定），`git apply --3way` 退化成 `patch -p1 --merge`，上游 diff、`git status` 干净判定、`tag → commit` 溯源也都需要对象库；而 tarball 省下的是 23MB vs 151MB 的下载量，相对 2GB 级检出（`.git` 约 200MB ≈ 8%）不是决定性收益。新默认同时与官方 README「Run from source」的 `git clone` 一致。
+- **`--tarball` 保留为回退**（网络极差时的单次 HTTPS + 重试）；用归档方式拉取**成功后新增告警**，当场说明该检出没有 `.git`、不能 `rdsh patch export`。
+- `--git` 仍可作为显式写法（与默认等价）；`--full` 仍表示克隆完整历史。
+
 ## 0.2.1 — 2026-09-19
 
 ### 变更

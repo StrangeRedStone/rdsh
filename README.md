@@ -30,7 +30,7 @@
 | `rdsh backup [版本]` | 备份数据目录到 `$BASE/.dsh-backup/` |
 | `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
-| `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认归档 tarball，`--git` 克隆） |
+| `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
 
 配套脚本：

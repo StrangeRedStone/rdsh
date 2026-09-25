@@ -31,8 +31,9 @@
 #   rdsh patch list|status|apply|revert|export  # 检出补丁管理（转发 patch-manager.sh）
 #                                         #   apply/revert 会改检出：默认要 --yes，支持 --dry-run
 #   rdsh fetch --list [--refresh]         # 列远端可用版本（GitHub API 列举 + 10 分钟缓存；失败回退 git ls-remote）
-#   rdsh fetch <版本> [--dir <名>] [--git] [--full] [--install] [--dry-run]
-#                                         # 拉取指定版本检出到 $BASE/dsh/（默认走归档 tarball：更小更稳；--git 则 clone）
+#   rdsh fetch <版本> [--dir <名>] [--tarball] [--full] [--install] [--dry-run]
+#                                         # 拉取指定版本检出到 $BASE/dsh/（默认 git clone --depth 1，与官方源码装法一致，
+#                                         #   后续 rdsh patch export / 上游 diff 可用；--tarball 改走归档：更小更稳但无 .git）
 #   rdsh help
 #
 # 选择目标：序号 | 版本号片段(rc.2) | 项目名片段(harness) | 检出目录名 | 完整路径。
@@ -730,7 +731,7 @@ all_remote_tags() {  # 带 10 分钟磁盘缓存的远端 tag；--refresh 强制
   cat "$cache"
 }
 cmd_fetch() {
-  local list=0 tarball=1 gitmode=0 full=0 do_install=0 dry=0 dirname="" ver="" a prev=""
+  local list=0 tarball=0 gitmode=1 full=0 do_install=0 dry=0 dirname="" ver="" a prev=""
   for a in "$@"; do
     case "$a" in
       --list|-l) list=1 ;;
@@ -778,7 +779,7 @@ cmd_fetch() {
   fi
 
   if [ "$dry" = "1" ]; then
-    printf '  [dry-run] 方式: %s\n' "$([ "$tarball" = "1" ] && echo '归档 tarball（默认，无 .git）' || echo "git clone$([ "$full" = "1" ] && echo '' || echo ' --depth 1') --branch $tag（--git）")"
+    printf '  [dry-run] 方式: %s\n' "$([ "$tarball" = "1" ] && echo '归档 tarball（--tarball，无 .git）' || echo "git clone$([ "$full" = "1" ] && echo '' || echo ' --depth 1') --branch $tag（默认）")"
     printf '  [dry-run] 目标: %s\n' "$target"
     printf '  [dry-run] 之后: rdsh install %s\n' "$ver"
     return 0
@@ -793,19 +794,20 @@ cmd_fetch() {
     log "下载 $url"
     if ! curl -fL --retry 2 --connect-timeout 15 -o "$tmp/src.tar.gz" "$url"; then
       rdsh_trash "$tmp"
-      die '下载失败：网络不畅（校园网/公司网对 GitHub 常见）或版本不存在。可重试、换 --git，或调大 RDSH_FETCH_TIMEOUT'
+      die '下载失败：网络不畅（校园网/公司网对 GitHub 常见）或版本不存在。可重试、去掉 --tarball 改用默认的 git 方式，或调大 RDSH_FETCH_TIMEOUT'
     fi
     if ! tar -xzf "$tmp/src.tar.gz" -C "$tmp"; then rdsh_trash "$tmp"; die '解压失败'; fi
     local inner; inner="$(find "$tmp" -maxdepth 1 -mindepth 1 -type d -name 'deepseek-harness-*' | head -1)"
     [ -n "$inner" ] || { rdsh_trash "$tmp"; die '归档结构与预期不符'; }
     mv "$inner" "$target"
     rdsh_trash_quiet "$tmp"   # 成功路径：静默清理临时目录（不 rm，挪到回收目录）
+    warn '注意：归档检出没有 .git —— rdsh patch export 不可用，也无法 git diff/status 对比上游；需要补丁或考古请去掉 --tarball 用默认的 git 方式重拉。'
   else
     local depth=(--depth 1)
     [ "$full" = "1" ] && depth=()
     if ! git clone "${depth[@]}" --branch "$tag" "$REMOTE_URL" "$tmp"; then
       rdsh_trash "$tmp"
-      die 'git clone 失败：网络不畅或版本不存在。可重试、改用默认的归档方式（去掉 --git），或调大 RDSH_FETCH_TIMEOUT'
+      die 'git clone 失败：网络不畅或版本不存在。可重试、改用归档方式 --tarball，或调大 RDSH_FETCH_TIMEOUT'
     fi
     mv "$tmp" "$target"
   fi
