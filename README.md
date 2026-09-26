@@ -21,17 +21,23 @@
 
 | 子命令 | 作用 |
 |---|---|
-| `rdsh` / `rdsh start [版本\|序号\|路径]` | 列表菜单 / 启动指定项（`--dry-run` 预览） |
+| `rdsh` / `rdsh run [版本\|序号\|路径]…` | 列表菜单 / 启动 1..N 个实例（默认**后台化** + 端口**递增**；`--dry-run` 预览，`--foreground` 占终端） |
+| `rdsh stop [目标\|端口]` | 停实例：默认停"**端口最大的那一个**"（后进先出）；`--all` 从大到小、`--port N` 点名、`--dry-run` 只打印、`--probe` 只验投递链路 |
 | `rdsh list` | 列版本（检出状态 / 数据目录） |
-| `rdsh status` | 运行实例 + 数据总览 |
+| `rdsh status` | 运行实例（全部端口，含 `debug:<id>` 与"你所在的实例"）+ 数据总览 |
+| `rdsh debug new\|start\|stop\|ls\|add\|detach\|rm\|env` | **可丢弃沙箱**：`new` 建全新空 `DSH_HOME`（不播种、不链任何东西），`add/detach` 按调试目的加/摘作者资产与凭据，`rm` 先停实例再整体挪进回收目录（**永不 `rm`**）+ 还原命令 |
+| `rdsh exec <版本\|debug-id> -- <命令>` | 在指定环境里跑一次性命令（排障用） |
 | `rdsh add <检出路径>` | 把检出纳入管理 |
 | `rdsh install [版本]` | `pnpm install` + 构建 + 打标 |
 | `rdsh data [-o] [版本]` | 显示 / 打开数据目录 |
 | `rdsh backup [版本]` | 备份数据目录到 `$BASE/.dsh-backup/` |
-| `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token） |
+| `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token；按端口分家） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
+
+> `start` 与 `run` 等价（兼容别名）。多实例归属靠"**端口 + DSH_HOME**"两个维度：
+> 同一 `DSH_HOME` 拒绝双开（会互相写 `workspace.json`/`settings`）；**同版本多开走 `rdsh debug`**。
 
 配套脚本：
 

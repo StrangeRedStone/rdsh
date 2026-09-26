@@ -20,6 +20,7 @@
 #     --dry-run              只打印计划，不做任何写入
 #     --carry-sessions=all   连 sessions/ 一起搬（默认 none：选择性可续，旧 home 冻结为归档）
 #     --no-backup            跳过备份（不推荐；会写进回退基线备注）
+#     --no-probe-live        探针不做实机实测门（默认做：隔离 home 启动 + 真实工具调用）
 #
 # 环境覆盖（默认与 Rdsh.sh 一致；便于隔离测试）:
 #   DSH_DATA_ROOT   $BASE/.dsh          DSH_MANAGE_ROOT $BASE/dsh
@@ -61,6 +62,7 @@ BASELINE="$BACKUP_ROOT/回退基线.md"
 DRY=0
 CARRY_SESSIONS=none
 DO_BACKUP=1
+PROBE_LIVE=1        # 探针 v2 的实机实测门（隔离 home 启动 + 真实工具调用）；--no-probe-live 可关
 SRC_ARG=""
 DST_ARG=""
 
@@ -78,6 +80,8 @@ for a in "$@"; do
     --dry-run) DRY=1 ;;
     --no-backup) DO_BACKUP=0 ;;
     --carry-sessions=*) CARRY_SESSIONS="${a#*=}" ;;
+    --probe-live) PROBE_LIVE=1 ;;
+    --no-probe-live) PROBE_LIVE=0 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "未知选项：$a（用 --help）" ;;
     *) if [ -z "$SRC_ARG" ]; then SRC_ARG="$a"; elif [ -z "$DST_ARG" ]; then DST_ARG="$a"; else die "多余参数：$a"; fi ;;
@@ -320,15 +324,32 @@ if [ -f "$DST_HOME/plugins/setup.sh" ]; then
 fi
 printf '  提醒：插件的编译产物是针对**源码检出版本**打的；若新版 API 有变，需在目标检出里重新构建\n'
 
-# ---- 6. 探针（在目标 home 上跑 compat_check） ----
+# ---- 6. 探针（compat-check v2：CLI + 自检 + 可选实机实测门） ----
 PROBE_OUT=""
-step "6/7 探针：对目标 home 跑 compat_check（断点报告）"
-PROBE="$DST_HOME/plugins/compat-check/lib/index.mjs"
+PROBE_RC=0
+step "6/7 探针：对目标 home 跑 compat-check v2（$([ "$PROBE_LIVE" = "1" ] && echo '静态 + 自检 + 实机实测门' || echo '静态 + 自检')）"
+PROBE_CLI="$DST_HOME/plugins/compat-check/lib/cli.mjs"
+PROBE_LEGACY="$DST_HOME/plugins/compat-check/lib/index.mjs"
+PROBE_ARGS=(--home "$DST_HOME" --checkout "$DST_CHECKOUT" --scope all --selftest --from "$SRC_VER")
+[ "$PROBE_LIVE" = "1" ] && PROBE_ARGS+=(--live)
 if [ "$DRY" = "1" ]; then
-  act "node <import $PROBE> → 报告写入 $BACKUP_DIR/compat-report.md"
-elif [ -f "$PROBE" ]; then
+  act "node $PROBE_CLI ${PROBE_ARGS[*]} → 报告写入 $BACKUP_DIR/compat-report.md（退出码 = 最高严重度）"
+elif [ -f "$PROBE_CLI" ]; then
+  set +e
+  PROBE_OUT=$(node "$PROBE_CLI" "${PROBE_ARGS[@]}" 2>&1)
+  PROBE_RC=$?
+  set -e
+  if [ -n "$PROBE_OUT" ]; then
+    [ "$DO_BACKUP" = "1" ] && printf '%s\n' "$PROBE_OUT" > "$BACKUP_DIR/compat-report.md"
+    printf '%s\n' "$PROBE_OUT" | grep -E '^## 结论|^- (自检|实测门|检出已构建)|⛔|⚠️|ℹ️' | sed 's/^/    /' || true
+    printf '  探针退出码 %s（0 可继续 / 1 有 WARN / 2 有 ERROR 或自检失败；P1：只提示不拦）\n' "$PROBE_RC"
+  else
+    warn '探针无输出（可能是目标 home 的 compat-check 依赖链未建好）'
+  fi
+elif [ -f "$PROBE_LEGACY" ]; then
+  warn '目标 home 只有旧版探针（无 CLI）→ 这份报告不含自检与实测门'
   PROBE_OUT=$(node --input-type=module -e "
-    const mod = await import('$PROBE')
+    const mod = await import('$PROBE_LEGACY')
     const tools = new Map()
     mod.apply({ tools: { register: (s) => tools.set(s.name, s) }, get: (n) => ({ __stub: n }) })
     console.log(String(await tools.get('compat_check').execute({ home: '$DST_HOME', checkout: '$DST_CHECKOUT', scope: 'all', fix: false })))
@@ -342,7 +363,7 @@ elif [ -f "$PROBE" ]; then
 else
   warn "目标 home 没有 compat-check，跳过探针"
 fi
-[ "$DRY" = "0" ] && printf '  提示：探针在 DSH 进程外运行（桩 ctx）→ C 维度「服务是否运行时注册」不具结论性；启动目标版本后请用 compat_check 再复跑一次\n'
+[ "$DRY" = "0" ] && printf '  提示：CLI 在 DSH 进程外运行（无真 ctx）→ C 维「服务运行时注册」不具结论性；启动目标版本后可在会话里用 compat_check 复跑（那里有真 ctx）\n'
 
 # ---- 7. 回退基线 ----
 step "7/7 回退基线（$BASELINE，只追加）"

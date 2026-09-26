@@ -76,10 +76,22 @@ if [ -z "$MANAGE_ROOT" ]; then
 fi
 RDSH_BIN="$MANAGE_ROOT/Rdsh.sh"
 
-# 若被投递到 systemd 单元执行，统一把输出落到日志文件
-if [ -n "${DSH_RESTART_LOG:-}" ]; then
-  exec >>"$DSH_RESTART_LOG" 2>&1
-  log "（本次运行由 systemd 单元执行，日志：$DSH_RESTART_LOG）"
+# 落盘：调用方可用 DSH_RESTART_LOG 指定；**没指定就自己定一个**。
+# 为什么必须自兜底：2026-09-26 实测 reboot 插件投递单元时没设它，于是整段重启过程
+# 只进 journal，事后翻查麻烦、工具提示里的路径也不存在。自兜底让任何调用方都受益。
+# 关掉：DSH_RESTART_NOLOG=1（输出留在 stdout/journal）。
+if [ "${DSH_RESTART_NOLOG:-0}" != "1" ]; then
+  RESTART_LOG="${DSH_RESTART_LOG:-$LOG_DIR/restart-$TS.log}"
+  mkdir -p "$(dirname "$RESTART_LOG")" 2>/dev/null || true
+  # 先探可写（在子 shell 里试），成功再 exec —— exec 的重定向失败会让非交互 shell 直接退出，
+  # 那就变成了"为了记日志把重启搞挂"，本末倒置。
+  if ( umask 077; : >>"$RESTART_LOG" ) 2>/dev/null; then
+    DSH_RESTART_LOG="$RESTART_LOG"
+    exec >>"$DSH_RESTART_LOG" 2>&1
+    log "（本次运行由 systemd 单元执行，日志：$DSH_RESTART_LOG）"
+  else
+    warn "无法写入 $RESTART_LOG —— 本次输出只留在 stdout/journal（DSH_RESTART_LOG 可指定别处）"
+  fi
 fi
 
 # ---------------------------------------------------------------- 进程/端口工具
@@ -183,7 +195,9 @@ else
 fi
 
 # 用 rdsh 自己的解析器校验目标（--dry-run 不做端口检查、不写任何东西）
-DRY_OUT="$("$RDSH_BIN" start --dry-run ${REQ:+"$REQ"} 2>&1)"
+# --takeover：本脚本稍后会把旧实例停掉，所以"该 home 已在跑"不算冲突（rdsh v5 起默认会拦）
+# --port：钉住端口 —— rdsh v5 起不指定端口会"最大端口+1"，重启时必须回到原端口
+DRY_OUT="$("$RDSH_BIN" start --dry-run --takeover --port "$PORT" ${REQ:+"$REQ"} 2>&1)"
 DRY_RC=$?
 if [ "$DRY_RC" != "0" ]; then
   printf '%s\n' "$DRY_OUT" >&2
@@ -265,11 +279,15 @@ fi
 
 # ------------------------------------------------------------------ 6) 拉起新实例
 UNIT="dsh-web-$TS"
-LOG_HINT="$LOG_DIR/web-${NEW_VER:-未知}.log"
+LOG_HINT="$LOG_DIR/web-${NEW_VER:-未知}-${PORT}.log"
 log "用 systemd-run 拉起新实例：unit=$UNIT（这样它的 cgroup 不在 DSH 的 managed range 内）…"
+# --foreground：rdsh v5 起 run/start 默认自己后台化，而本脚本**已经**在 systemd 单元里了，
+# 必须让它原地前台跑，否则会再套一层 unit（rdsh 内部有 DSH_LAUNCH_DETACHED 兜底，这里是显式表达）
+# --takeover：旧实例刚被我们停掉，允许复用它的 DSH_HOME
+# --port：回到原端口（否则会被 rdsh 的"最大端口+1"挪走）
 systemd-run --user --unit="$UNIT" --collect \
   --setenv=PATH="$PATH" --setenv=HOME="$HOME" \
-  "$RDSH_BIN" start --log "$NEW_DIR" >/dev/null 2>&1
+  "$RDSH_BIN" start --foreground --takeover --log --port "$PORT" "$NEW_DIR" >/dev/null 2>&1
 if [ $? -ne 0 ]; then
   die "systemd-run 启动失败。请手工执行：rdsh start $NEW_DIR" 2
 fi

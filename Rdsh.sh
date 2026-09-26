@@ -10,20 +10,49 @@
 #                                               facts.md/backlog.md；各版本 home 内以软链共享，不复制）
 #   备份根   : $BASE/.dsh-backup/               （rdsh backup / migrate.sh 的落点）
 #   启动日志 : $BASE/.dsh-logs/                 （含访问 token，目录 700 / 文件 600）
+#   实例注册表: $BASE/.dsh-suite/run/           （instances/<端口>.kv；只是注解，真相是 ss + /proc）
 #   映射文件 : $BASE/dsh/.map                   （可选，可手改）
 #       行格式 dir|<检出目录名>|<数据目录>     —— 该检出的数据目录改指（如未迁移的 rc.2）
 #               ext|<绝对路径>|<数据目录>      —— 登记一个"本体不动、仅数据隔离"的外部检出
 #   相关工具 : migrate.sh（同目录）             —— 跨版本迁移器：备份 + 建链 + 探针 + 回退基线
 #              reindex-workspaces.sh（同目录） —— 重建工作区归属（手拷会话后显示「未分组」时用）
 #
-# 用法（首个参数为子命令；不写 = start）：
-#   rdsh                                  # 启动：列表菜单（回车=默认[最新]，序号/版本/项目名/路径）
-#   rdsh start [版本|序号|项目名|路径]     # 启动指定项（--dry-run 预览；--no-log 关启动日志）
+# 用法（首个参数为子命令；不写 = run）：
+#   rdsh                                  # 启动：列表菜单（回车=默认[最新]；可一次给多个，空格分隔）
+#   rdsh run [版本|序号|项目名|路径]...    # 启动 1..N 个实例。默认**后台化**（systemd 用户单元，
+#                                         #   关终端也不死），端口默认**递增**（在跑的最大端口 +1）
+#       --port N                          #   指定起始端口（多个目标按 --step 递增）
+#       --step N（默认1）--timeout N（默认90，等端口就绪）
+#       --foreground                      #   占着终端跑（老行为；rdsh-restart.sh 用这条）
+#       --no-open | --open                #   是否自动开浏览器（多目标时默认不开）
+#       --dry-run                         #   只打印计划；--no-log 关启动日志
+#                                         #   同一 DSH_HOME 已在跑 → 拒绝（多开会互相写 workspace）
+#   rdsh start ...                        # 同 run（兼容别名，rdsh-restart.sh 仍可用）
 #   rdsh add <检出路径> [--mode iso|link|body]
-#                                         # 手动把检出纳入管理；同 start <新路径> 的询问
+#                                         # 手动把检出纳入管理；同 run <新路径> 的询问
 #   rdsh list                             # 列版本（序号/检出状态/数据目录）
-#   rdsh status                           # 运行实例 + 数据总览
+#   rdsh status                           # 运行实例（全部端口）+ 数据总览
+#   rdsh stop [目标|端口]                 # 停实例：默认停"端口最大的那一个"（后进先出）
+#       --port N | --all                  #   指定端口 / 从最大端口往小全停
+#       --dry-run                         #   只打印会杀谁（含 cwd/cmd 证据），不发信号
+#       --timeout N（默认30）--delay N（默认3，自杀式停止的缓冲）--force（确认自杀）
+#       --probe                           #   照常投递到 systemd 单元，但单元里只走到
+#                                         #   "该杀谁"为止：不发信号（验证逃生链路用）
+#                                         #   红线：目标过不了归属校验就绝不碰；绝不用 -9
+#                                         #   在 dsh 内停"自己所在的实例"时会自动投递到一次性
+#                                         #   systemd 单元，本命令立即返回，延迟后由单元执行
 #   rdsh install [版本|序号|项目名|路径]   # pnpm install + build + 打标
+#   rdsh debug new <版本> [--tag 名]      # 建"干净环境"：全新空 DSH_HOME（不播种、不链任何东西）
+#       --assets | --creds | --copy-creds  #   按调试目的单独加料（作者资产 / 凭据）
+#       --port N | --start | --dry-run
+#   rdsh debug start|stop <id>            # 启/停某个调试环境（同版本多开的正路）
+#   rdsh debug ls                         # 列调试环境（端口/在跑否/链了什么/大小/创建时间）
+#   rdsh debug add|detach <id> ...        # 事后补加 / 摘掉（摘只挪软链，真身不动）
+#   rdsh debug rm <id|--all|--older-than 7d>
+#                                         # 删：先停实例 → 整体挪进回收目录（**永不 rm**），
+#                                         #   并打印还原命令；只认 $BASE/.dsh-suite/debug/ 下的
+#   rdsh debug env <id>                   # 打印可 eval 的 DSH_HOME/cd（排障用）
+#   rdsh exec <版本|debug-id> -- <命令>    # 在指定环境里跑一次性命令
 #   rdsh data [-o] [版本|序号|项目名|路径] # 显示 / 打开数据目录
 #   rdsh backup [版本|序号]               # 备份数据目录到 $BASE/.dsh-backup/
 #   rdsh logs [-f] [版本|序号] [-o]       # 查看/打开启动日志（--clean 清理旧日志）
@@ -72,6 +101,8 @@ _data="$(expand "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")"
 _backup="$(expand "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"
 _shared="$(expand "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"
 _logdir="$(expand "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")"
+_run="$(expand "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")"
+_dbg="$(expand "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/dsh}"
 # 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
@@ -87,6 +118,19 @@ MAP_FILE="$MANAGE_ROOT/.map"
 LEGACY_HOME="$HOME/.dsh"                 # 旧单根布局：bootstrap 模板 + 模式3的默认数据位置
 WEB_LOG="${DSH_WEB_LOG:-1}"               # 1=dsh web 控制台输出同时落盘（事后可查插件/监听器报错）；0=关闭
 LOG_DIR="${_logdir:-$BASE/.dsh-logs}"     # 启动日志目录（内含访问 token，故目录 700 / 文件 600）
+RUN_DIR="${_run:-$BASE/.dsh-suite/run}"   # 实例注册表（注解层；真相仍是 ss + /proc）
+INSTANCES_DIR="$RUN_DIR/instances"        # 每实例一份 <端口>.kv
+WEB_PORT="${DSH_WEB_PORT:-3080}"          # 默认监听端口；run/start 的 --port 可覆写
+STOP_TIMEOUT="${DSH_STOP_TIMEOUT:-30}"    # rdsh stop 等端口释放的上限秒数
+STOP_DELAY="${DSH_STOP_DELAY:-3}"         # 自杀式停止时留给调用方落盘的秒数
+LAUNCH_TIMEOUT="${DSH_LAUNCH_TIMEOUT:-90}" # 后台启动后等端口就绪的上限秒数
+NO_OPEN="${DSH_NO_OPEN:-0}"               # 1=不给 dsh 传 --no-open 的反面：1 表示传 --no-open（不开浏览器）
+DEBUG_ROOT="${_dbg:-$BASE/.dsh-suite/debug}" # 调试环境根：<id>.env 清单 + <id>/ 就是干净 DSH_HOME
+# 调用期覆盖（由 --debug <id> 设置）：让 launch_* 用调试环境的 home / 登记 kind=debug
+ENTRY_HOME_OVERRIDE=""
+INSTANCE_KIND="real"
+INSTANCE_ID=""
+DEBUG_MODE=0
 AUTO_INSTALL="${RDSH_AUTO_INSTALL:-1}"    # 1=启动时检出缺依赖自动安装；0=只提示
 REMOTE_URL="${RDSH_REMOTE:-https://github.com/deepseek-ai/deepseek-harness.git}"
 TAG_PREFIX="${RDSH_TAG_PREFIX:-dsh-v}"    # 远端 tag 命名：dsh-v<版本>
@@ -95,6 +139,7 @@ log()  { printf '\033[1;34m[rdsh]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[rdsh!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[rdsh!]\033[0m %s\n' "$*" >&2; exit 1; }
 has_tty() { [ -t 0 ] || [ "${DSH_MENU:-0}" = "1" ]; }
+SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"   # 自杀式停止时要把自己投递到 systemd 单元
 
 read_version() {  # 检出根 -> 版本号（package.json 优先，否则用目录名）
   local dir="$1" v=""
@@ -263,21 +308,209 @@ resolve_target() {  # 目标串 -> 条目。路径若指向未管理的检出则
   resolve_match "$arg"
 }
 
-# ---- 启动 ----
-port_busy() {
+# ---- 端口与实例：真相层（ss + /proc） ----
+# 端口不再硬编码：默认 $WEB_PORT，`--port N` 覆写。所有读写都用"端口"作参数。
+port_listening() {  # [端口] → 0/1
+  local p="${1:-$WEB_PORT}"
   command -v ss >/dev/null 2>&1 || return 1
-  ss -ltn 2>/dev/null | awk '{print $4}' | grep -q '127.0.0.1:3080$'
+  ss -ltnH "sport = :$p" 2>/dev/null | grep -q .
 }
-port_owner_cwd() {  # 正在监听 3080 的进程工作目录（若有）；本函数恒返回 0
+port_busy() { port_listening "${1:-$WEB_PORT}"; }
+
+port_pid() {  # [端口] → owner PID（查不到输出空）；恒返回 0
+  local p="${1:-$WEB_PORT}"
   command -v ss >/dev/null 2>&1 || return 0
-  local line pid
-  line=$(ss -ltnp 2>/dev/null | awk '/127.0.0.1:3080/{print; exit}')
-  [ -n "$line" ] || return 0
-  pid=$(printf '%s' "$line" | sed -nE 's/.*pid=([0-9]+).*/\1/p' | head -1)
-  if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
-    readlink "/proc/$pid/cwd"
+  ss -ltnpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2
+  return 0
+}
+
+listening_ports() {  # 本机所有监听端口（升序去重）
+  command -v ss >/dev/null 2>&1 || return 0
+  ss -ltnpH 2>/dev/null | awk '{p=$4; sub(/.*:/,"",p); if (p ~ /^[0-9]+$/) print p}' | sort -un
+}
+
+port_free_from() {  # <起始端口> → 从它起第一个空闲端口
+  local p="${1:-$WEB_PORT}"
+  while port_listening "$p"; do p=$((p+1)); done
+  printf '%s' "$p"
+}
+
+proc_cwd()     { readlink "/proc/$1/cwd" 2>/dev/null || true; }
+proc_cmdline() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null || true; }
+proc_home() {  # 从进程环境取 DSH_HOME（未显式设置则输出空，由调用方按默认处理）
+  tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -nE 's/^DSH_HOME=(.*)$/\1/p' | head -1 || true
+}
+cgroup_unit() {  # 本进程所在"我们自己的" systemd 用户单元名（无则空）—— 只认 dsh-web-* / rdsh-dbg-*
+  grep -oE '(dsh-web|rdsh-dbg)-[A-Za-z0-9_.@-]+\.service' /proc/self/cgroup 2>/dev/null | head -1 || true
+}
+
+# 归属校验：只承认"我们的 dsh web"——命令行必须是 web 入口，且 cwd 是已管理检出
+# 或名字像 dsh 检出（兼容未登记的旧实例）。家规：禁用 pkill/pgrep -f；
+# 任何信号/停止动作都必须先过这一关。
+is_dsh_web_pid() {  # <pid> → 0/1
+  local pid="$1" cwd cmd
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] || return 1
+  cwd="$(proc_cwd "$pid")"
+  [ -n "$cwd" ] || return 1
+  cmd="$(proc_cmdline "$pid")"
+  case "$cmd" in *"bin.ts web"*|*"dsh web"*) ;; *) return 1 ;; esac
+  [ -n "$(entry_by_dir "$cwd")" ] && return 0
+  case "$(basename "$cwd")" in *deepseek-harness*) return 0 ;; esac
+  return 1
+}
+port_owner_cwd() {  # [端口] → 该端口上 dsh 实例的工作目录（若有）；恒返回 0
+  local p pid; pid="$(port_pid "${1:-$WEB_PORT}")"
+  [ -n "$pid" ] && proc_cwd "$pid"
+  return 0
+}
+
+# ---- 实例注册表：注解层（$RUN_DIR/instances/<端口>.kv） ----
+# 真相永远是 ss + /proc；注册表只补 ss 查不到的字段：kind(real|debug)、debug id、
+# systemd 单元名、启动日志、启动时间。注册表缺失/过期都不影响识别（过期条目自动退休）。
+registry_ports() {  # 注册表里登记过的端口
+  [ -d "$INSTANCES_DIR" ] || return 0
+  local f
+  for f in "$INSTANCES_DIR"/*.kv; do
+    [ -f "$f" ] || continue
+    basename "$f" .kv
+  done
+}
+registry_get() {  # <端口> <键> → 值（无则空）
+  local f="$INSTANCES_DIR/$1.kv"
+  [ -f "$f" ] || return 0
+  sed -nE "s/^$2=(.*)$/\1/p" "$f" | tail -1
+}
+registry_put() {  # <端口> <pid> <版本> <检出> <DSH_HOME> <kind> <id> <unit> <日志> [时间]
+  local p="$1" f="$INSTANCES_DIR/$1.kv" tmp
+  mkdir -p "$INSTANCES_DIR"; chmod 700 "$RUN_DIR" "$INSTANCES_DIR" 2>/dev/null || true
+  tmp="$f.tmp.$$"
+  { printf 'port=%s\n'    "$1"
+    printf 'pid=%s\n'     "$2"
+    printf 'ver=%s\n'     "$3"
+    printf 'dir=%s\n'     "$4"
+    printf 'data=%s\n'    "$5"
+    printf 'kind=%s\n'    "${6:-real}"
+    printf 'id=%s\n'      "${7:-}"
+    printf 'unit=%s\n'    "${8:-}"
+    printf 'log=%s\n'     "${9:-}"
+    printf 'started=%s\n' "${10:-$(date -Is)}"
+  } > "$tmp"
+  mv -f "$tmp" "$f"
+}
+registry_retire() {  # <端口>：把注册表里的死条目挪到 stale/（永不 rm）
+  local p="$1" f="$INSTANCES_DIR/$1.kv"
+  [ -f "$f" ] || return 0
+  mkdir -p "$RUN_DIR/stale"
+  mv "$f" "$RUN_DIR/stale/$p-$(date +%s).kv" 2>/dev/null || true
+}
+
+# 活实例 = 真相 ∪ 注解。每行：port|pid|ver|dir|data|kind|id|unit|started
+instances_live() {
+  local p pid dir data ver kind id unit started f seen=""
+  for p in $(listening_ports); do
+    pid="$(port_pid "$p")"
+    [ -n "$pid" ] || continue
+    is_dsh_web_pid "$pid" || continue
+    dir="$(proc_cwd "$pid")"; data="$(proc_home "$pid")"
+    ver="$(read_version "${dir:-/nonexistent}")"
+    kind="$(registry_get "$p" kind)"; [ -n "$kind" ] || kind=real
+    id="$(registry_get "$p" id)"
+    unit="$(registry_get "$p" unit)"
+    started="$(registry_get "$p" started)"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$p" "$pid" "$ver" "$dir" "$data" "$kind" "$id" "$unit" "$started"
+    seen="$seen $p"
+  done
+  # 注册表有、但端口上已不在跑 → 退休（annotation 清理，不 rm）
+  for f in $(registry_ports); do
+    case " $seen " in *" $f "*) continue ;; esac
+    registry_retire "$f"
+  done
+}
+
+# ---- stop：优雅停止实例（归属校验 + 自杀防护） ----
+# 家规：绝不用 pkill/pgrep -f；只对"过得了 is_dsh_web_pid"的进程动手，且绝不强杀（-9）。
+proc_ppid() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null || true; }
+
+ancestor_chain_has() {  # <pid> → 0/1：本进程($$)的祖先链里是否有它（自杀检测）
+  local want="$1" p=$$ guard=0
+  while [ -n "$p" ] && [ "$p" != "0" ] && [ "$p" != "1" ] && [ "$guard" -lt 64 ]; do
+    [ "$p" = "$want" ] && return 0
+    p="$(proc_ppid "$p")"
+    guard=$((guard+1))
+  done
+  return 1
+}
+
+instance_matches() {  # <目标串> <端口> <版本> <检出> <debug id> → 0/1；纯数字只当端口
+  local arg="$1" p="$2" ver="$3" dir="$4" id="$5" base
+  if [[ "$arg" =~ ^[0-9]+$ ]]; then
+    [ "$p" = "$arg" ] && return 0
+    return 1
+  fi
+  [ -n "$id" ] && [ "$arg" = "$id" ] && { return 0; }
+  case "$ver" in *"$arg"*) return 0 ;; esac
+  base="$(basename "$dir")"
+  case "$base" in *"$arg"*) return 0 ;; esac
+  if [ -d "$arg" ] && [ "$(readlink -f "$arg")" = "$(readlink -f "$dir")" ]; then return 0; fi
+  return 1
+}
+
+stop_one() {  # <端口> <pid> <版本> <检出> <kind> <id> <unit> <超时> → 0 成功 / 1 未确认
+  local p="$1" pid="$2" ver="$3" dir="$4" kind="$5" id="$6" unit="$7" tmo="$8"
+  local ppid waited=0 pcmd pcwd
+  if ! is_dsh_web_pid "$pid"; then
+    warn "端口 $p：PID $pid 不是 dsh web（cwd=$(proc_cwd "$pid")；cmd=$(proc_cmdline "$pid")）→ 拒绝动它"
+    return 1
+  fi
+  ppid="$(proc_ppid "$pid")"
+  if [ -n "$unit" ] && command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    log "端口 $p：systemctl --user stop $unit（整 cgroup 优雅停机）"
+    timeout "$tmo" systemctl --user stop "$unit" >/dev/null 2>&1 \
+      || warn "systemctl stop $unit 超时或返回非零（继续等端口释放）"
+  else
+    log "端口 $p：向 PID $pid 发 SIGTERM（未托管实例，优雅停机）"
+    kill -TERM "$pid" 2>/dev/null || warn "kill -TERM $pid 失败（可能已退出）"
+  fi
+  while port_listening "$p"; do
+    if [ "$waited" -ge "$tmo" ]; then
+      warn "等了 ${tmo}s 端口 $p 仍被占用 → 未强杀。请手工检查：ss -ltnp 'sport = :$p'"
+      return 1
+    fi
+    sleep 1; waited=$((waited+1))
+  done
+  log "端口 $p 已释放（等了 ${waited}s）"
+  # pnpm 包装进程可能残留（子进程退出后通常会自己走）；只在归属匹配时补一刀
+  if [ -n "$ppid" ] && [ -d "/proc/$ppid" ]; then
+    sleep 1
+    if [ -d "/proc/$ppid" ]; then
+      pcmd="$(proc_cmdline "$ppid")"; pcwd="$(proc_cwd "$ppid")"
+      case "$pcmd$pcwd" in
+        *"pnpm dsh web"*) log "包装进程 PID $ppid（pnpm）仍在，补发 SIGTERM"; kill -TERM "$ppid" 2>/dev/null || true ;;
+        *) : ;;
+      esac
+    fi
   fi
   return 0
+}
+
+detach_stop() {  # <日志> <超时> <延迟> <原始参数...>：把自己投递到一次性 systemd 单元，stdout 输出单元名
+  local logf="$1" tmo="$2" delay="$3"; shift 3
+  command -v systemd-run >/dev/null 2>&1 \
+    || die '没有 systemd-run，无法脱离 dsh 进程树安全执行自杀式停止。请在 dsh 外的终端里运行本命令。'
+  mkdir -p "$(dirname "$logf")"; ( umask 077; : > "$logf" )
+  local unitname="rdsh-stop-$(date +%Y%m%d-%H%M%S)"
+  local args=(--user --unit="$unitname" --collect
+              --setenv=PATH="$PATH" --setenv=HOME="$HOME"
+              --setenv=DSH_STOP_DETACHED=1 --setenv=DSH_STOP_LOG="$logf")
+  # systemd 不继承自定义环境变量（实测）：显式转发 RDSH_*/DSH_* 覆盖项
+  local v
+  for v in RDSH_BASE RDSH_CONFIG RDSH_MANAGE_ROOT RDSH_DATA_ROOT RDSH_BACKUP_ROOT \
+           RDSH_SHARED_HOME RDSH_RUN_DIR DSH_LOG_DIR DSH_WEB_PORT DSH_WEB_LOG; do
+    [ -n "${!v:-}" ] && args+=(--setenv="$v=${!v}")
+  done
+  systemd-run "${args[@]}" "$SELF" stop "$@" --timeout "$tmo" --delay "$delay" --force >/dev/null 2>&1 \
+    || die '投递到 systemd 失败（systemd-run --user 不可用？）'
+  printf '%s' "$unitname"
 }
 
 # ---- 作者资产：稳定根 + 软链 -------------------------------------------------
@@ -318,6 +551,14 @@ link_author_assets() {
 
 ensure_data_home() {
   local data="$1"
+  # 调试环境：只建目录，**不播种、不建链** —— "默认全新"就落在这一支上。
+  # 想加作者资产/凭据走 `rdsh debug add <id> --assets|--creds`（显式、可撤销）。
+  if [ "$DEBUG_MODE" = "1" ]; then
+    [ -d "$data" ] || { log "创建调试数据目录: $data"; mkdir -p "$data"; chmod 700 "$data"; }
+    export DSH_HOME="$data"
+    log "DSH_HOME=$DSH_HOME（调试环境：不播种、不建链）"
+    return 0
+  fi
   if [ "$data" = "$LEGACY_HOME" ]; then
     [ -d "$data" ] || die "数据目录 $data 不存在——疑似 ~/.dsh 已被移动。请先把它迁回，或改 .map 中对应行。"
     return
@@ -367,29 +608,36 @@ ensure_built() {
 }
 
 launch_entry() {
-  local entry="$1" dry="$2" ver dir data
-  ver=$(entry_field "$entry" 1); dir=$(entry_field "$entry" 2); data=$(entry_field "$entry" 4)
+  local entry="$1" dry="$2" port="${3:-$WEB_PORT}" ver dir data
+  ver=$(entry_field "$entry" 1); dir=$(entry_field "$entry" 2)
+  data="${ENTRY_HOME_OVERRIDE:-$(entry_field "$entry" 4)}"
   log "启动版本: $ver"
   log "检出目录: $dir"
+  log "监听端口: $port"
   if [ "$dry" = "1" ]; then echo "DSH_HOME  : $data"; return 0; fi
-  if port_busy; then
-    local owner; owner=$(port_owner_cwd)
-    die "127.0.0.1:3080 已被占用（运行中检出：${owner:-未知}）。请先停掉旧实例再启动。"
+  if port_busy "$port"; then
+    local owner; owner=$(port_owner_cwd "$port")
+    die "127.0.0.1:$port 已被占用（运行中检出：${owner:-未知}）。请先停掉旧实例，或用 --port 换端口。"
   fi
   ensure_data_home "$data"
   ensure_built "$dir"
   cd "$dir" || die "无法进入 $dir"
   command -v pnpm >/dev/null || die '未找到 pnpm'
   # 启动输出同时落盘：事后可检索插件/技能监听器的报错（此前这类报错只在终端里，无法复查）
+  local logfile="$LOG_DIR/web-$ver-$port.log"
   if [ "$WEB_LOG" = "1" ]; then
-    local logfile="$LOG_DIR/web-$ver.log"
     mkdir -p "$LOG_DIR"; chmod 700 "$LOG_DIR" 2>/dev/null || true
     ( umask 077; [ -f "$logfile" ] || : > "$logfile" )   # 文件权限 600（含访问 token）
-    log "启动日志: $logfile（含访问 token，勿外传；rdsh start --no-log 可关）"
+    log "启动日志: $logfile（含访问 token，勿外传；rdsh run --no-log 可关）"
     exec > >(tee -a "$logfile") 2>&1
   fi
+  # 登记注解：PID 未知（马上就 exec 了），ss 会补上；这里主要记单元名与日志路径，
+  # 让 status/stop 知道"这个实例是被 systemd 托管的"（停它可以整 cgroup 优雅收掉）。
+  registry_put "$port" "" "$ver" "$dir" "$data" "$INSTANCE_KIND" "$INSTANCE_ID" "$(cgroup_unit)" "$logfile"
   log '启动 dsh web（Ctrl+C 退出）...'
-  exec pnpm dsh web
+  local webflags=(--port "$port")
+  [ "$NO_OPEN" = "1" ] && webflags+=(--no-open)
+  exec pnpm dsh web "${webflags[@]}"
 }
 
 # 纳入管理询问（模式）：1=全面隔离 2=仅数据隔离 3=本体移动数据不动；默认 1
@@ -449,53 +697,603 @@ adopt_and_entry() {
   esac
 }
 
-# ---- 子命令实现 ----
-cmd_start() {
-  local dry=0 target="" a
-  for a in "$@"; do
-    case "$a" in --dry-run|-n ) dry=1 ;; --no-log ) WEB_LOG=0 ;; --log ) WEB_LOG=1 ;; * ) target="$a" ;; esac
+# ---- 启动：端口规划 / 同 home 守卫 / 后台批量 ----
+next_port() {  # 默认加一：在跑实例的最大端口 +1；一个都没有则从 $WEB_PORT 起找空闲
+  local max="" p pid
+  for p in $(listening_ports); do
+    pid="$(port_pid "$p")"
+    [ -n "$pid" ] || continue
+    is_dsh_web_pid "$pid" || continue
+    if [ -z "$max" ] || [ "$p" -gt "$max" ]; then max="$p"; fi
   done
-  if [ "$dry" = "0" ] && port_busy; then
-    local owner; owner=$(port_owner_cwd)
-    die "127.0.0.1:3080 已被占用（运行中检出：${owner:-未知}）。请先停掉旧实例再启动。"
-  fi
-  local entry="" mode=""
-  if [ -z "$target" ]; then
-    if has_tty; then
-      list_entries >&2
-      local defver; defver=$(entry_field "$(pick_default)" 1)
-      printf '\n直接回车 = 默认 [1] %s；输入 序号/版本/项目名/路径 后回车启动；q 退出。\n' "$defver" >&2
-      printf '选择> ' >&2
-      local sel=""
-      read -r sel || true
-      sel=$(clean_input "$sel")
-      printf '\n' >&2
-      case "$sel" in
-        "" ) entry=$(pick_default) ;;
-        q|Q ) echo '已取消'; exit 0 ;;
-        * ) entry=$(resolve_target "$sel") ;;
-      esac
-    else
-      entry=$(pick_default)
+  if [ -n "$max" ]; then port_free_from $((max + 1)); else port_free_from "$WEB_PORT"; fi
+}
+
+home_conflict_port() {  # <DSH_HOME> → 已有实例用着它的端口（无则空）
+  local want="$1" rows p pid _a data _b _c _d _e
+  [ -n "$want" ] || return 0
+  want="$(readlink -f "$want" 2>/dev/null || printf '%s' "$want")"
+  rows="$(instances_live)"
+  while IFS='|' read -r p pid _a _b data _c _d _e _f; do
+    [ -n "$p" ] || continue
+    [ -n "$data" ] || data="$LEGACY_HOME"
+    if [ "$(readlink -f "$data" 2>/dev/null || printf '%s' "$data")" = "$want" ]; then
+      printf '%s' "$p"; return 0
     fi
-  else
-    entry=$(resolve_target "$target")
-  fi
+  done <<< "$rows"
+  return 0
+}
+
+resolve_or_adopt() {  # <目标串> <端口> → 条目（UNMANAGED 时走登记流程；stdout 只输出条目）
+  local target="$1" want_port="$2" entry mode owner upath
+  entry="$(resolve_target "$target")"
   if [[ "$entry" == UNMANAGED:* ]]; then
-    local upath="${entry#UNMANAGED:}"
-    local owner; owner=$(port_owner_cwd)
+    upath="${entry#UNMANAGED:}"
+    owner="$(port_owner_cwd "$want_port")"
     if [ -n "$owner" ] && [ "$(readlink -f "$owner")" = "$upath" ]; then
       die "该检出正在运行中，不能移动/重新登记。请先停掉它。"
     fi
     if has_tty; then
-      mode=$(adopt_prompt "$upath")
+      mode="$(adopt_prompt "$upath")"
     else
       log "非交互环境：按“仅数据隔离”登记 $upath"
       mode=link
     fi
-    entry=$(adopt_and_entry "$upath" "$mode")
+    entry="$(adopt_and_entry "$upath" "$mode")"
   fi
-  launch_entry "$entry" "$dry"
+  printf '%s\n' "$entry"
+}
+
+launch_bg_one() {  # <条目> <端口> <等待秒数> <noopen 0/1> → 0 就绪 / 1 未就绪
+  local entry="$1" p="$2" tmo="$3" noopen="$4"
+  local ver dir data unit unitname logf pid waited ts
+  ver=$(entry_field "$entry" 1); dir=$(entry_field "$entry" 2)
+  data="${ENTRY_HOME_OVERRIDE:-$(entry_field "$entry" 4)}"
+  unit="dsh-web-$ver-$p"
+  [ "$INSTANCE_KIND" = "debug" ] && unit="rdsh-dbg-$INSTANCE_ID-$p"
+  logf="$LOG_DIR/web-$ver-$p.log"
+  mkdir -p "$LOG_DIR"; chmod 700 "$LOG_DIR" 2>/dev/null || true
+  local common=(--collect --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=DSH_LAUNCH_DETACHED=1)
+  local v
+  for v in RDSH_BASE RDSH_CONFIG RDSH_MANAGE_ROOT RDSH_DATA_ROOT RDSH_BACKUP_ROOT \
+           RDSH_SHARED_HOME RDSH_RUN_DIR DSH_LOG_DIR DSH_WEB_PORT DSH_WEB_LOG; do
+    [ -n "${!v:-}" ] && common+=(--setenv="$v=${!v}")
+  done
+  local cmd=("$SELF" start "$dir" --port "$p" --foreground)
+  [ "$INSTANCE_KIND" = "debug" ] && cmd+=(--debug "$INSTANCE_ID")
+  [ "$noopen" = "1" ] && cmd+=(--no-open)
+  [ "$WEB_LOG" = "1" ] || cmd+=(--no-log)
+  if ! systemd-run --user --unit="$unit" "${common[@]}" "${cmd[@]}" >/dev/null 2>&1; then
+    ts="$(date +%s)"; unitname="$unit-$ts"
+    warn "单元名 $unit 已被占用，改用 $unitname"
+    systemd-run --user --unit="$unitname" "${common[@]}" "${cmd[@]}" >/dev/null 2>&1 \
+      || { warn "投递到 systemd 失败（systemd-run --user 不可用？）"; return 1; }
+    unit="$unitname"
+  fi
+  log "已投递 unit=$unit，等端口 $p 就绪…"
+  waited=0
+  while ! port_listening "$p"; do
+    if [ "$waited" -ge "$tmo" ]; then
+      warn "端口 $p 在 ${tmo}s 内没起来 —— unit 仍在后台继续（首次安装可能很慢）"
+      warn "  诊断：systemctl --user status $unit    日志：$logf"
+      return 1
+    fi
+    sleep 1; waited=$((waited+1))
+  done
+  pid="$(port_pid "$p")"
+  if ! is_dsh_web_pid "$pid"; then
+    warn "端口 $p 上的进程不是我们的 dsh web（PID ${pid:-?}）—— 可能被别的服务占了。未登记。"
+    return 1
+  fi
+  registry_put "$p" "$pid" "$ver" "$dir" "$data" "$INSTANCE_KIND" "$INSTANCE_ID" "$unit" "$logf"
+  if [ "$INSTANCE_KIND" = "debug" ]; then
+    log "已启动调试环境：$INSTANCE_ID（$ver）  端口 $p  PID $pid  等了 ${waited}s"
+  else
+    log "已启动：$ver  端口 $p  PID $pid  等了 ${waited}s"
+  fi
+  printf '        URL: http://127.0.0.1:%s/    日志: %s\n' "$p" "$logf"
+  return 0
+}
+
+# ---- 调试环境：可丢弃沙箱 ----------------------------------------------------
+# 布局：$DEBUG_ROOT/<id>.env（清单 600）+ $DEBUG_ROOT/<id>/（就是 DSH_HOME，默认**完全空**）。
+# 「默认全新」= 不播种 settings、不链作者资产、不链凭据；要什么用 `debug add` 显式加，可 `detach` 摘掉。
+# id 规则（硬约束）：必须以字母开头 —— 保证 `rdsh run 0.1.7` 永远命中正式版本，不会撞上沙箱名。
+debug_env_file() { printf '%s/%s.env' "$DEBUG_ROOT" "$1"; }
+debug_home()     { printf '%s/%s' "$DEBUG_ROOT" "$1"; }
+debug_ids() {
+  [ -d "$DEBUG_ROOT" ] || return 0
+  local f
+  for f in "$DEBUG_ROOT"/*.env; do
+    [ -f "$f" ] || continue
+    basename "$f" .env
+  done
+}
+debug_get() {  # <id> <键> → 值（无则空）
+  local f; f="$(debug_env_file "$1")"
+  [ -f "$f" ] || return 0
+  sed -nE "s/^$2=(.*)$/\1/p" "$f" | tail -1
+}
+debug_put() {  # <id> <版本> <检出> <assets 0/1> <creds none|link|copy>
+  local id="$1" f created
+  f="$(debug_env_file "$id")"; created="$(debug_get "$id" created)"
+  [ -n "$created" ] || created="$(date -Is)"
+  mkdir -p "$DEBUG_ROOT"; chmod 700 "$DEBUG_ROOT" 2>/dev/null || true
+  ( umask 077
+    { printf 'id=%s\n'      "$id"
+      printf 'ver=%s\n'     "$2"
+      printf 'dir=%s\n'     "$3"
+      printf 'home=%s\n'    "$(debug_home "$id")"
+      printf 'created=%s\n' "$created"
+      printf 'assets=%s\n'  "$4"
+      printf 'creds=%s\n'   "$5"
+    } > "$f" )
+}
+debug_load() {  # <id> → 0/1；设好 DEBUG_MODE/ENTRY_HOME_OVERRIDE/INSTANCE_KIND/INSTANCE_ID
+  local id="$1" home
+  [ -n "$(debug_get "$id" home)" ] || return 1
+  home="$(debug_home "$id")"
+  [ -d "$home" ] || return 1
+  DEBUG_MODE=1; ENTRY_HOME_OVERRIDE="$home"; INSTANCE_KIND=debug; INSTANCE_ID="$id"
+  return 0
+}
+debug_port_of() {  # <id> → 该环境正在跑的端口（无则空）
+  local p _pid _ver _dir _data _kind _id _unit _st
+  while IFS='|' read -r p _pid _ver _dir _data _kind _id _unit _st; do
+    [ -n "$p" ] || continue
+    [ "$_id" = "$1" ] && { printf '%s' "$p"; return 0; }
+  done <<< "$(instances_live)"
+  return 0
+}
+debug_link_assets() {  # <home>：只建软链；home 里已有真文件只警告不动（P1）
+  local home="$1" n
+  for n in "${AUTHOR_ASSETS[@]}"; do
+    [ -e "$SHARED_ROOT/$n" ] || { warn "稳定根没有 $n，跳过"; continue; }
+    [ -L "$home/$n" ] && continue
+    if [ -e "$home/$n" ]; then warn "$home/$n 已是真文件，未动"; continue; fi
+    ln -s "$SHARED_ROOT/$n" "$home/$n"
+    log "  + $n → $SHARED_ROOT/$n"
+  done
+}
+debug_unlink_assets() {  # <home>：只摘"指向稳定根"的软链（把链接本身挪进回收目录，真身不动）
+  local home="$1" n
+  for n in "${AUTHOR_ASSETS[@]}"; do
+    if [ -L "$home/$n" ] && [ "$(readlink -f "$home/$n")" = "$(readlink -f "$SHARED_ROOT/$n")" ]; then
+      rdsh_trash_quiet "$home/$n"; log "  - $n"
+    fi
+  done
+}
+creds_source() {  # 凭据源：优先各版本 home，其次 ~/.dsh
+  local e data
+  for e in "${ENTRIES[@]}"; do
+    data="$(entry_field "$e" 4)"
+    [ -f "$data/.credentials.yaml" ] && { printf '%s' "$data/.credentials.yaml"; return 0; }
+  done
+  [ -f "$LEGACY_HOME/.credentials.yaml" ] && printf '%s' "$LEGACY_HOME/.credentials.yaml"
+  return 0
+}
+debug_link_creds() {  # <home> [link|copy]
+  local home="$1" mode="${2:-link}" src
+  src="$(creds_source)"
+  [ -n "$src" ] || { warn '找不到 .credentials.yaml（各版本 home 与 ~/.dsh 都没有）→ 跳过凭据'; return 1; }
+  if [ -L "$home/.credentials.yaml" ]; then
+    if [ "$(readlink -f "$home/.credentials.yaml")" = "$(readlink -f "$src")" ]; then
+      log '  = .credentials.yaml 已链到同一份源，跳过'
+      return 0
+    fi
+    rdsh_trash "$home/.credentials.yaml"      # 别的软链：挪走留痕再链
+  elif [ -e "$home/.credentials.yaml" ]; then
+    # dsh 首启会自己建一个空的 .credentials.yaml（不带 key）；要接真凭据就得先把它挪走
+    rdsh_trash "$home/.credentials.yaml"
+  fi
+  if [ "$mode" = "copy" ]; then
+    cp -p "$src" "$home/.credentials.yaml"
+    chmod 600 "$home/.credentials.yaml"    # dsh 硬校验：凭据文件不能有组/其他位
+    log '  + .credentials.yaml（独立复制一份，已 chmod 600）'
+  else
+    ln -s "$src" "$home/.credentials.yaml"
+    log "  + .credentials.yaml → $src（软链，读写同一份）"
+  fi
+}
+debug_unlink_creds() {  # <home>
+  local home="$1"
+  [ -L "$home/.credentials.yaml" ] || return 0
+  rdsh_trash_quiet "$home/.credentials.yaml"; log '  - .credentials.yaml（链接挪走，真身未动）'
+}
+
+cmd_debug_ls() {
+  local ids; ids="$(debug_ids)"
+  if [ -z "$ids" ]; then
+    log "还没有调试环境。新建：rdsh debug new <版本> --tag <名> [--assets] [--creds] [--start]"
+    return 0
+  fi
+  local id home ver created assets creds size port rows; rows="$(instances_live)"
+  printf '\n调试环境（%s）：\n' "$DEBUG_ROOT"
+  for id in $ids; do
+    home="$(debug_home "$id")"; ver="$(debug_get "$id" ver)"; created="$(debug_get "$id" created)"
+    assets="$(debug_get "$id" assets)"; creds="$(debug_get "$id" creds)"
+    size="$(du -sh "$home" 2>/dev/null | cut -f1 || true)"
+    port="$(debug_port_of "$id")"
+    printf '  %-14s %-14s %s\n' "$id" "$ver" "$([ -n "$port" ] && echo "运行中（端口 $port）" || echo '未运行')"
+    printf '        home: %s (%s)   创建: %s\n' "$home" "${size:-?}" "$created"
+    printf '        作者资产: %s   凭据: %s\n' \
+      "$([ "$assets" = "1" ] && echo '已链' || echo '无')" \
+      "$([ -z "$creds" ] || [ "$creds" = "none" ] && echo '无' || echo "$creds")"
+    printf '        启动: rdsh debug start %s     删除: rdsh debug rm %s\n' "$id" "$id"
+  done
+}
+
+cmd_debug_new() {
+  local ver="" tag="" assets=0 creds="none" port="" start=0 dry=0 a
+  local -a sargs=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --tag ) shift; [ $# -gt 0 ] || die '--tag 需要名字'; tag="$1" ;;
+      --tag=* ) tag="${a#--tag=}" ;;
+      --assets ) assets=1 ;;
+      --creds ) creds=link ;;
+      --copy-creds ) creds=copy ;;
+      --port ) shift; [ $# -gt 0 ] || die '--port 需要端口号'; sargs+=(--port "$1") ;;
+      --port=* ) sargs+=(--port "${a#--port=}") ;;
+      --no-open|--open|--foreground|--fg ) sargs+=("$a") ;;
+      --start ) start=1 ;;
+      --dry-run|-n ) dry=1 ;;
+      -*) die "未知选项：$a（用 rdsh help 看用法）" ;;
+      * ) ver="$a" ;;
+    esac
+    shift
+  done
+  [ -n "$ver" ] || die '用法: rdsh debug new <版本|序号|项目名|路径> [--tag 名] [--assets] [--creds|--copy-creds] [--port N] [--start] [--dry-run]'
+  local entry; entry="$(resolve_target "$ver")"
+  [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理，先 rdsh add <路径> --mode iso|link|body'
+  local rver id home i
+  rver="$(entry_field "$entry" 1)"
+  if [ -z "$tag" ]; then
+    i=1; while [ -e "$(debug_env_file "d$i")" ] || [ -d "$(debug_home "d$i")" ]; do i=$((i+1)); done
+    id="d$i"
+  else
+    id="$tag"
+  fi
+  case "$id" in
+    [A-Za-z]*) ;;
+    *) die "调试环境 id 必须以字母开头（收到：$id）—— 这样 rdsh run <版本> 永远不会撞上沙箱名" ;;
+  esac
+  case "$id" in *[!A-Za-z0-9._-]*) die "id 只能含字母数字与 . _ -（收到：$id）" ;; esac
+  home="$(debug_home "$id")"
+  if [ -e "$(debug_env_file "$id")" ] || [ -d "$home" ]; then
+    die "调试环境 “$id” 已存在（rdsh debug ls 看）"
+  fi
+  log "新建调试环境: $id（版本 $rver）"
+  printf '  DSH_HOME : %s\n  检出     : %s\n  正式数据 : %s（本命令不会碰它）\n' \
+    "$home" "$(entry_field "$entry" 2)" "$(entry_field "$entry" 4)"
+  if [ "$dry" = "1" ]; then log '--dry-run：未创建任何东西。'; return 0; fi
+  mkdir -p "$home"; chmod 700 "$home"
+  debug_put "$id" "$rver" "$(entry_field "$entry" 2)" "$assets" "$creds"
+  log '默认全新：不播种 settings、不链作者资产、不链凭据'
+  if [ "$assets" = "1" ]; then debug_link_assets "$home"; fi
+  if [ "$creds" != "none" ]; then debug_link_creds "$home" "$creds" || true; fi
+  log "创建完成。启动：rdsh debug start $id    删除：rdsh debug rm $id"
+  if [ "$start" = "1" ]; then
+    cmd_debug_start "$id" "${sargs[@]}"
+  fi
+}
+
+cmd_debug_start() {
+  local id="${1:-}"; [ -n "$id" ] || die '用法: rdsh debug start <id> [--port N] [--foreground] [--no-open]'
+  shift
+  debug_load "$id" || die "没有调试环境 “$id”（rdsh debug ls 看）"
+  local dir; dir="$(debug_get "$id" dir)"
+  [ -d "$dir" ] || die "调试环境 $id 的检出已不存在：$dir"
+  cmd_start "$dir" --debug "$id" "$@"
+}
+
+cmd_debug_stop() {
+  local id="${1:-}"; [ -n "$id" ] || die '用法: rdsh debug stop <id>'
+  debug_load "$id" >/dev/null 2>&1 || die "没有调试环境 “$id”"
+  shift
+  cmd_stop "$id" "$@"
+}
+
+cmd_debug_add() {  # <id> [--assets] [--creds|--copy-creds]
+  local id="${1:-}"; [ -n "$id" ] || die '用法: rdsh debug add <id> [--assets] [--creds|--copy-creds]'
+  shift
+  [ -f "$(debug_env_file "$id")" ] || die "没有调试环境 “$id”"
+  local home a assets creds did=0
+  home="$(debug_home "$id")"
+  assets="$(debug_get "$id" assets)"; [ -n "$assets" ] || assets=0
+  creds="$(debug_get "$id" creds)";   [ -n "$creds" ]  || creds=none
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --assets ) debug_link_assets "$home"; assets=1; did=1 ;;
+      --creds ) if debug_link_creds "$home" link; then creds=link; fi; did=1 ;;
+      --copy-creds ) if debug_link_creds "$home" copy; then creds=copy; fi; did=1 ;;
+      *) die "未知选项：$a（--assets / --creds / --copy-creds）" ;;
+    esac
+    shift
+  done
+  [ "$did" = "1" ] || die '要加什么？--assets / --creds / --copy-creds'
+  debug_put "$id" "$(debug_get "$id" ver)" "$(debug_get "$id" dir)" "$assets" "$creds"
+  log '清单已更新'
+  warn 'skills 与 .credentials.yaml 是热重载的（应即时生效）；AGENTS.md / .agent-presets 通常要重启实例'
+  log "生效：rdsh debug stop $id && rdsh debug start $id"
+}
+
+cmd_debug_detach() {  # <id> [--assets] [--creds]（不带参数 = 全摘）
+  local id="${1:-}"; [ -n "$id" ] || die '用法: rdsh debug detach <id> [--assets] [--creds]'
+  shift
+  [ -f "$(debug_env_file "$id")" ] || die "没有调试环境 “$id”"
+  local home assets creds a all=1
+  home="$(debug_home "$id")"
+  assets="$(debug_get "$id" assets)"; [ -n "$assets" ] || assets=0
+  creds="$(debug_get "$id" creds)";   [ -n "$creds" ]  || creds=none
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --assets ) debug_unlink_assets "$home"; assets=0; all=0 ;;
+      --creds ) debug_unlink_creds "$home"; creds=none; all=0 ;;
+      *) die "未知选项：$a（--assets / --creds）" ;;
+    esac
+    shift
+  done
+  if [ "$all" = "1" ]; then
+    debug_unlink_assets "$home"; debug_unlink_creds "$home"; assets=0; creds=none
+  fi
+  debug_put "$id" "$(debug_get "$id" ver)" "$(debug_get "$id" dir)" "$assets" "$creds"
+  warn '真身（稳定根里的资产 / 源凭据）未动；被摘掉的软链在回收目录，mv 回去即可还原'
+}
+
+cmd_debug_rm() {  # <id> | --all | --older-than 7d
+  local dry=0 all=0 older="" id="" a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --dry-run|-n ) dry=1 ;;
+      --all ) all=1 ;;
+      --older-than ) shift; older="${1:-}"; [ -n "$older" ] || die '--older-than 需要天数，如 7d' ;;
+      -*) die "未知选项：$a" ;;
+      * ) id="$a" ;;
+    esac
+    shift
+  done
+  local ids="" x c cut days
+  if [ "$all" = "1" ]; then
+    ids="$(debug_ids)"
+  elif [ -n "$older" ]; then
+    days="${older%d}"; case "$days" in ''|*[!0-9]*) die "--older-than 形如 7d（收到：$older）" ;; esac
+    cut=$(( $(date +%s) - days * 86400 ))
+    for x in $(debug_ids); do
+      c="$(debug_get "$x" created)"; c="$(date -d "$c" +%s 2>/dev/null || echo 0)"
+      [ "$c" -lt "$cut" ] && ids="$ids $x"
+    done
+  else
+    [ -n "$id" ] || die '用法: rdsh debug rm <id> | --all | --older-than 7d（可加 --dry-run）'
+    ids="$id"
+  fi
+  ids="$(printf '%s' "$ids" | tr ' ' '\n' | sed '/^$/d' | tr '\n' ' ')"
+  if [ -z "${ids// /}" ]; then log '没有匹配的调试环境'; return 0; fi
+  # 硬白名单：只能是 $DEBUG_ROOT 下的、且带清单的环境（正式 data/<版本> 到不了这里）
+  for x in $ids; do
+    [ -f "$(debug_env_file "$x")" ] || die "“$x” 不是调试环境（没有清单）—— 拒绝删除"
+    case "$(debug_home "$x")" in "$DEBUG_ROOT"/*) ;; *) die "路径不在 $DEBUG_ROOT 下：$(debug_home "$x")" ;; esac
+  done
+  warn "将处理：$ids"
+  local p dest ts
+  for x in $ids; do
+    p="$(debug_port_of "$x")"
+    if [ -n "$p" ]; then
+      if [ "$dry" = "1" ]; then
+        log "[dry-run] 会先停端口 $p（环境 $x）"
+      else
+        cmd_stop "$x" || { warn "环境 $x 的实例未确认停止 → 跳过删除"; continue; }
+      fi
+    fi
+  done
+  if [ "$dry" = "1" ]; then log '--dry-run：未删除任何东西。'; return 0; fi
+  ts="$(date +%Y%m%d-%H%M%S)"; dest="${RDSH_TRASH:-/tmp}/rdsh-trash-debug-$ts"
+  mkdir -p "$dest"
+  for x in $ids; do
+    [ -e "$(debug_home "$x")" ] && mv "$(debug_home "$x")" "$dest/$x"
+    [ -e "$(debug_env_file "$x")" ] && mv "$(debug_env_file "$x")" "$dest/$x.env"
+    log "已挪走：$x"
+  done
+  log "回收目录（永不 rm）：$dest"
+  printf '  还原：mv %s/<id> %s/ && mv %s/<id>.env %s/\n' "$dest" "$DEBUG_ROOT" "$dest" "$DEBUG_ROOT"
+}
+
+cmd_debug_env() {  # <id>：打印可直接 eval 的环境
+  local id="${1:-}"; [ -n "$id" ] || die '用法: rdsh debug env <id>'
+  debug_load "$id" >/dev/null 2>&1 || die "没有调试环境 “$id”"
+  printf 'export DSH_HOME=%s\n' "$(debug_home "$id")"
+  printf 'cd %s\n' "$(debug_get "$id" dir)"
+}
+
+cmd_debug() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ""|ls|list ) cmd_debug_ls ;;
+    new|create ) cmd_debug_new "$@" ;;
+    start|up ) cmd_debug_start "$@" ;;
+    stop|down ) cmd_debug_stop "$@" ;;
+    add ) cmd_debug_add "$@" ;;
+    detach ) cmd_debug_detach "$@" ;;
+    rm|delete ) cmd_debug_rm "$@" ;;
+    env ) cmd_debug_env "$@" ;;
+    -h|--help|help ) printf 'rdsh debug new|start|stop|ls|add|detach|rm|env　（详见 rdsh help）\n' ;;
+    * ) die "未知子命令：debug $sub（可用：new start stop ls add detach rm env）" ;;
+  esac
+}
+
+cmd_exec() {  # exec <版本|序号|项目名|debug-id|路径> -- <命令...>
+  local target="" a; local -a args=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    if [ "$a" = "--" ]; then shift; args=("$@"); break; fi
+    target="$a"; shift
+  done
+  [ -n "$target" ] || die '用法: rdsh exec <版本|序号|项目名|debug-id|路径> -- <命令...>'
+  [ "${#args[@]}" -gt 0 ] || die '用法: rdsh exec <目标> -- <命令...>（-- 后面是要跑的命令）'
+  local dir home entry
+  if [ -n "$(debug_get "$target" home)" ]; then
+    debug_load "$target" >/dev/null 2>&1 || die "调试环境 $target 不可用"
+    dir="$(debug_get "$target" dir)"; home="$(debug_home "$target")"
+  else
+    entry="$(resolve_target "$target")"
+    [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理，先 rdsh add <路径> --mode iso|link|body'
+    dir="$(entry_field "$entry" 2)"; home="$(entry_field "$entry" 4)"
+  fi
+  [ -d "$dir" ] || die "检出不存在：$dir"
+  log "环境 $home（检出 $dir）"
+  ( cd "$dir" && DSH_HOME="$home" exec "${args[@]}" )
+}
+
+# ---- 子命令实现 ----
+# run/start：默认后台化（systemd 用户单元，脱离终端与 DSH cgroup），端口默认递增；
+# --foreground 回到"占着终端跑"的老行为（rdsh-restart.sh 与单元内部的调用走这条）。
+cmd_start() {
+  local dry=0 bg=1 noopen="" timeout="$LAUNCH_TIMEOUT" step=1 port="" explicit_port=0 takeover=0 debug_id="" a
+  local -a raws=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --dry-run|-n ) dry=1 ;;
+      --takeover ) takeover=1 ;;
+      --debug ) shift; [ $# -gt 0 ] || die '--debug 需要一个调试环境 id'; debug_id="$1" ;;
+      --no-log ) WEB_LOG=0 ;;
+      --log ) WEB_LOG=1 ;;
+      --foreground|--fg ) bg=0 ;;
+      --background|--bg|-b ) bg=1 ;;
+      --no-open ) noopen=1 ;;
+      --open ) noopen=0 ;;
+      --port ) shift; [ $# -gt 0 ] || die '--port 需要一个端口号'; port="$1"; explicit_port=1 ;;
+      --port=* ) port="${a#--port=}"; explicit_port=1 ;;
+      --step ) shift; [ $# -gt 0 ] || die '--step 需要数字'; step="$1" ;;
+      --timeout ) shift; [ $# -gt 0 ] || die '--timeout 需要秒数'; timeout="$1" ;;
+      -* ) die "未知选项：$a（用 rdsh help 看用法）" ;;
+      * ) raws+=("$a") ;;
+    esac
+    shift
+  done
+  [ "${DSH_LAUNCH_DETACHED:-0}" = "1" ] && bg=0     # 防递归：单元内部一律前台
+  if [ -n "$debug_id" ]; then
+    debug_load "$debug_id" || die "没有调试环境 “$debug_id”（用 rdsh debug ls 看）"
+  fi
+  case "$step" in ''|*[!0-9]*) die "--step 需要非负整数，收到：$step" ;; esac
+  case "$timeout" in ''|*[!0-9]*) die "--timeout 需要非负整数，收到：$timeout" ;; esac
+  [ "$step" -ge 1 ] || die '--step 至少为 1'
+  if [ -n "$port" ]; then case "$port" in *[!0-9]*) die "--port 需要数字，收到：$port" ;; esac; fi
+
+  # ---- 选目标：无参数则走菜单（有 tty 才问）；支持一次给多个 ----
+  if [ "${#raws[@]}" -eq 0 ]; then
+    if has_tty; then
+      list_entries >&2
+      local defver; defver=$(entry_field "$(pick_default)" 1)
+      printf '\n直接回车 = 默认 [1] %s；可一次给多个（空格分隔）：序号/版本/项目名/路径；q 退出。\n' "$defver" >&2
+      printf '选择> ' >&2
+      local sel=""; read -r sel || true
+      sel=$(clean_input "$sel")
+      printf '\n' >&2
+      case "$sel" in q|Q ) echo '已取消'; exit 0 ;; esac
+      if [ -n "$sel" ]; then raws=($sel); else raws=(""); fi
+    else
+      raws=("")
+    fi
+  fi
+  if [ -z "$noopen" ]; then
+    if [ "${#raws[@]}" -gt 1 ]; then noopen=1; else noopen=0; fi
+  fi
+  if [ "$noopen" = "1" ]; then NO_OPEN=1; else NO_OPEN=0; fi
+  if [ "$bg" = "0" ] && [ "${#raws[@]}" -gt 1 ]; then
+    die "前台模式只能启动 1 个目标（你要启动 ${#raws[@]} 个）：去掉 --foreground 走后台"
+  fi
+
+  # ---- 规划：条目 × 端口（先全部校验，再动手） ----
+  local -a ents=() ports=()
+  local t e p base="" i=0 conflict
+  for t in "${raws[@]}"; do
+    if [ "$i" -eq 0 ]; then
+      if [ "$explicit_port" = "1" ]; then base="$port"; else base="$(next_port)"; fi
+    else
+      base=$((base + step))
+    fi
+    if [ "$explicit_port" = "1" ]; then p=$((port + i * step)); else p="$(port_free_from "$base")"; fi
+    e="$(resolve_or_adopt "$t" "$p")"
+    ents+=("$e"); ports+=("$p")
+    i=$((i+1))
+  done
+
+  local -a keep_e=() keep_p=() note=()
+  local bad=""
+  i=0
+  for e in "${ents[@]}"; do
+    p="${ports[$i]}"
+    local ehome; ehome="${ENTRY_HOME_OVERRIDE:-$(entry_field "$e" 4)}"
+    conflict="$(home_conflict_port "$ehome")"
+    local msg=""
+    # --takeover：调用方声明"该 home / 该端口上的旧实例我马上会停掉"（rdsh-restart.sh 用）。
+    # 真实占用仍会被 launch_entry 的 port_busy 复查挡住，不会静默双开。
+    if [ "$takeover" = "1" ] && { [ -n "$conflict" ] || port_busy "$p"; }; then
+      msg="! --takeover：该 home / 端口正被旧实例占用（调用方须先停掉它）"
+    elif [ -n "$conflict" ]; then
+      msg="✗ 数据目录已在端口 $conflict 上运行（同一 DSH_HOME 不能多开）"
+      [ -z "$bad" ] && bad="数据目录 $ehome 已在端口 $conflict 上运行。同一 DSH_HOME 多开会互相写 workspace/settings —— 同版本多开请用 rdsh debug new。"
+    elif port_busy "$p"; then
+      if [ "$explicit_port" = "1" ]; then
+        msg="✗ 端口 $p 已被占用（运行中检出：$(port_owner_cwd "$p")）"
+        [ -z "$bad" ] && bad="127.0.0.1:$p 已被占用（运行中检出：$(port_owner_cwd "$p")）。换 --port，或先 rdsh stop。"
+      else
+        local np; np="$(port_free_from $((p + 1)))"
+        msg="! 端口 $p 被占，改用 $np"
+        p="$np"
+      fi
+    fi
+    note+=("$msg"); keep_e+=("$e"); keep_p+=("$p")
+    i=$((i+1))
+  done
+  ents=("${keep_e[@]}"); ports=("${keep_p[@]}")
+
+  # ---- 计划（这几行的格式被 rdsh-restart.sh grep 解析，勿改） ----
+  echo "== 启动计划（${#ents[@]} 个） =="
+  i=0
+  for e in "${ents[@]}"; do
+    log "启动版本: $(entry_field "$e" 1)"
+    log "检出目录: $(entry_field "$e" 2)"
+    log "监听端口: ${ports[$i]}"
+    printf 'DSH_HOME  : %s\n' "${ENTRY_HOME_OVERRIDE:-$(entry_field "$e" 4)}"
+    [ "$INSTANCE_KIND" = "debug" ] && printf '调试环境  : %s（kind=debug，status 里会单列）\n' "$INSTANCE_ID"
+    [ -n "${note[$i]}" ] && printf '            %s\n' "${note[$i]}"
+    i=$((i+1))
+  done
+  printf '模式: %s%s\n' "$([ "$bg" = "1" ] && echo '后台（systemd 用户单元）' || echo '前台（占终端）')" \
+    "$([ "$noopen" = "1" ] && echo '，不自动开浏览器' || echo '')"
+  if [ -n "$bad" ]; then
+    warn "$bad"
+    if [ "$dry" = "1" ]; then log '--dry-run：计划里有冲突，未启动任何东西。'; return 1; fi
+    die '计划里有冲突，未启动任何东西。'
+  fi
+  if [ "$dry" = "1" ]; then log '--dry-run：到此为止，未启动任何东西。'; return 0; fi
+
+  # ---- 前台：只支持单个目标 ----
+  if [ "$bg" = "0" ]; then
+    launch_entry "${ents[0]}" 0 "${ports[0]}"
+    return 0
+  fi
+
+  # ---- 后台：逐个投递 + 等就绪 + 登记 ----
+  local failed=0
+  i=0
+  for e in "${ents[@]}"; do
+    launch_bg_one "$e" "${ports[$i]}" "$timeout" "$noopen" || failed=$((failed+1))
+    i=$((i+1))
+  done
+  echo
+  if [ "$failed" = "0" ]; then
+    log "全部就绪（${#ents[@]} 个）。看实例：rdsh status；停止：rdsh stop（默认停端口最大的）"
+  else
+    warn "$failed 个实例未在 ${timeout}s 内就绪（其余不受影响）"
+  fi
+  [ "$failed" = "0" ]
 }
 
 cmd_add() {  # add <路径> [--mode iso|link|body]
@@ -524,17 +1322,23 @@ cmd_list() { list_entries; printf '\n共 %d 个。启动：rdsh <序号|版本|�
 
 cmd_status() {
   echo '== 运行实例 =='
-  if port_busy; then
-    echo '  端口 127.0.0.1:3080：被占用'
-    local pid cwd
-    pid=$(ss -ltnp 2>/dev/null | awk '/127.0.0.1:3080/{gsub(/pid=/,"",$NF); gsub(/,.*/,"",$NF); print $NF; exit}')
-    if [ -n "$pid" ] && [ -d "/proc/$pid/cwd" ]; then
-      cwd=$(readlink "/proc/$pid/cwd")
-      printf '  运行检出: %s\n' "$cwd"
-      printf '  DSH_HOME: %s\n' "$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep '^DSH_HOME=' || echo '(默认 ~/.dsh)')"
-    fi
+  local rows; rows="$(instances_live)"
+  if [ -z "$rows" ]; then
+    printf '  无（未发现由 dsh/rdsh 启动的 web 实例；默认端口 %s 空闲）\n' "$WEB_PORT"
   else
-    echo '  端口 127.0.0.1:3080：空闲'
+    local p pid ver dir data kind id unit started tag
+    while IFS='|' read -r p pid ver dir data kind id unit started; do
+      [ -n "$p" ] || continue
+      tag="$kind"
+      [ "$kind" = "debug" ] && tag="debug:${id:-?}"
+      local here=""
+      ancestor_chain_has "$pid" && here="   ← 你所在的实例"
+      printf '  [%s] %-14s %-12s PID %s%s\n' "$p" "$ver" "$tag" "$pid" "$here"
+      printf '        运行检出: %s\n' "$dir"
+      printf '        DSH_HOME: %s\n' "${data:-（默认 ~/.dsh）}"
+      printf '        URL: http://127.0.0.1:%s/    unit: %s    启动: %s\n' \
+        "$p" "${unit:-（无，非 systemd 托管）}" "${started:-未知}"
+    done <<< "$rows"
   fi
   echo
   echo '== 数据目录总览 =='
@@ -544,6 +1348,132 @@ cmd_status() {
     printf '  [%d] %-14s 检出:%-10s 数据: %s (%s)\n' "$i" "$ver" "$(built_status "$dir")" "$data" "$(data_state "$data")"
     i=$((i+1))
   done
+}
+
+# ---------------- stop：停止实例 ----------------
+# 默认 = 停"端口最大的那一个"（后进先出，与 run 的端口递增对称）；--all = 从最大端口往小全停。
+# 唯一不可覆盖的红线：目标进程过不了归属校验就绝不碰。
+cmd_stop() {
+  local ORIG_ARGS=("$@")
+  local all=0 dry=0 force=0 probe=0 port="" arg="" timeout="$STOP_TIMEOUT" delay="$STOP_DELAY" a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --all|-a ) all=1 ;;
+      --dry-run|-n ) dry=1 ;;
+      --probe ) probe=1 ;;
+      --force|-f|--yes|-y ) force=1 ;;
+      --timeout ) shift; [ $# -gt 0 ] || die '--timeout 需要秒数'; timeout="$1" ;;
+      --delay ) shift; [ $# -gt 0 ] || die '--delay 需要秒数'; delay="$1" ;;
+      --port ) shift; [ $# -gt 0 ] || die '--port 需要端口号'; port="$1" ;;
+      --port=* ) port="${a#--port=}" ;;
+      -*) die "未知选项：$a（用 rdsh help 看用法）" ;;
+      * ) arg="$a" ;;
+    esac
+    shift
+  done
+  case "$timeout" in ''|*[!0-9]*) die "--timeout 需要非负整数，收到：$timeout" ;; esac
+  case "$delay"   in ''|*[!0-9]*) die "--delay 需要非负整数，收到：$delay" ;; esac
+
+  local rows; rows="$(instances_live)"
+  [ -n "$rows" ] || { log '没有在跑的 dsh 实例'; return 0; }
+
+  # ---- 选目标 ----
+  local sel="" p pid ver dir data kind id unit started n=0
+  if [ -n "$port" ]; then
+    case "$port" in ''|*[!0-9]*) die "--port 需要数字，收到：$port" ;; esac
+    sel="$(printf '%s\n' "$rows" | awk -F'|' -v pp="$port" '$1==pp')"
+    [ -n "$sel" ] || die "端口 $port 上没有在跑的 dsh 实例（用 rdsh status 看）"
+  elif [ "$all" = "1" ]; then
+    sel="$(printf '%s\n' "$rows" | sort -t'|' -k1,1nr)"
+  elif [ -n "$arg" ]; then
+    while IFS='|' read -r p pid ver dir data kind id unit started; do
+      [ -n "$p" ] || continue
+      if instance_matches "$arg" "$p" "$ver" "$dir" "$id"; then
+        sel="$sel$p|$pid|$ver|$dir|$data|$kind|$id|$unit|$started"$'\n'
+        n=$((n+1))
+      fi
+    done <<< "$rows"
+    [ "$n" -gt 0 ] || die "没有匹配 “$arg” 的在跑实例（用 rdsh status 看）"
+    [ "$n" -eq 1 ] || die "“$arg” 匹配到 $n 个实例，请改用 --port 指定"
+  else
+    sel="$(printf '%s\n' "$rows" | sort -t'|' -k1,1nr | head -1)"   # 默认：端口最大
+  fi
+
+  # ---- 自杀检测（目标是不是本进程的祖先） ----
+  local self_ports=""
+  while IFS='|' read -r p pid ver dir data kind id unit started; do
+    [ -n "$p" ] || continue
+    ancestor_chain_has "$pid" && self_ports="$self_ports $p"
+  done <<< "$sel"
+
+  # ---- 计划 ----
+  echo '== 停止计划 =='
+  n=0
+  local how
+  while IFS='|' read -r p pid ver dir data kind id unit started; do
+    [ -n "$p" ] || continue
+    n=$((n+1))
+    if [ -n "$unit" ]; then how="systemctl --user stop $unit"; else how="SIGTERM PID $pid"; fi
+    printf '  %d) 端口 %s  %s  [%s%s]  %s\n' "$n" "$p" "$ver" "$kind" "${id:+:$id}" "$how"
+  done <<< "$sel"
+  [ -n "$self_ports" ] && warn "其中包含**你所在的实例**（端口：$self_ports）——停它会截断当前会话/终端"
+  if [ "$dry" = "1" ]; then
+    log '--dry-run：到此为止，未发任何信号。'
+    return 0
+  fi
+
+  # ---- 自杀防护 + 逃生舱 ----
+  # 需要投递到一次性单元的场景：① 目标包含自己（否则命令会被自己触发的关停杀掉）
+  # ② --probe（照常投递，只验证链路）。已在单元里就不再投递（防递归）。
+  local need_detach=0
+  [ -n "$self_ports" ] && need_detach=1
+  [ "$probe" = "1" ] && need_detach=1
+  [ "${DSH_STOP_DETACHED:-0}" = "1" ] && need_detach=0
+
+  if [ "$need_detach" = "1" ]; then
+    if [ -n "$self_ports" ] && [ "$force" != "1" ]; then
+      if has_tty; then
+        printf '目标包含你所在的实例，确认停止请输入 yes > ' >&2
+        local ans=""; read -r ans || true
+        [ "$(clean_input "$ans")" = "yes" ] || die '已取消'
+      else
+        die '非交互环境拒绝自杀式停止（会截断当前会话）。确认无误请加 --force，或用 rdsh-restart.sh 重启。'
+      fi
+    fi
+    local logf="$LOG_DIR/stop-$(date +%Y%m%d-%H%M%S).log" unitname
+    unitname="$(detach_stop "$logf" "$timeout" "$delay" "${ORIG_ARGS[@]}")"
+    if [ "$probe" = "1" ]; then
+      log "已投递到 systemd 单元：$unitname（--probe：只验证投递链路，不发信号）"
+    else
+      log "已投递到 systemd 单元：$unitname（$delay 秒后停止端口$self_ports）"
+      log '当前会话/终端即将被停掉 —— 这是预期的。'
+    fi
+    log "进度与结果看：$logf"
+    return 0
+  fi
+
+  # ---- 执行 ----
+  if [ "${DSH_STOP_PROBE:-0}" = "1" ] || [ "$probe" = "1" ]; then
+    log "--probe：投递链路验证结束 —— 未发任何信号、未停止任何实例。"
+    log "（若这是真跑，接下来会停止：$(printf '%s' "$sel" | awk -F'|' '{printf "%s ", $1}')）"
+    return 0
+  fi
+  # 自杀/投递场景才需要缓冲：单元副本里自己不是 dsh 后代（self_ports 为空），
+  # 所以必须把 DSH_STOP_DETACHED 也算进来，否则 --delay 会被静默跳过。
+  if [ "$delay" -gt 0 ] && { [ -n "$self_ports" ] || [ "${DSH_STOP_DETACHED:-0}" = "1" ]; }; then
+    log "等待 ${delay}s（给调用方落盘的时间）…"
+    sleep "$delay"
+  fi
+  echo '== 执行 =='
+  local failed=0
+  while IFS='|' read -r p pid ver dir data kind id unit started; do
+    [ -n "$p" ] || continue
+    stop_one "$p" "$pid" "$ver" "$dir" "$kind" "$id" "$unit" "$timeout" || failed=$((failed+1))
+  done <<< "$sel"
+  echo
+  if [ "$failed" = "0" ]; then log '停止完成'; else warn "$failed 个实例未能确认停止"; fi
+  [ "$failed" = "0" ]
 }
 
 cmd_install() {
@@ -598,6 +1528,8 @@ cmd_base() {
   printf '  作者资产根 : %s\n' "$SHARED_ROOT"
   printf '  备份根     : %s\n' "$BACKUP_ROOT"
   printf '  启动日志   : %s\n' "$LOG_DIR"
+  printf '  实例注册表 : %s（注解层）\n' "$RUN_DIR"
+  printf '  默认端口   : %s\n' "$WEB_PORT"
   [ -n "${RDSH_BASE:-}" ] && warn "环境变量 RDSH_BASE=$RDSH_BASE 正在覆盖配置文件（改配置不会生效）"
 
   if [ -z "$arg" ] && [ "$unset" = "0" ]; then
@@ -667,8 +1599,20 @@ cmd_logs() {
     [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理'
     ver=$(entry_field "$entry" 1)
   fi
-  local f="$LOG_DIR/web-$ver.log"
-  [ -f "$f" ] || die "没有 $f（该版本还没启动过？用 rdsh logs --clean 清理全部）"
+  # 日志名带端口（同版本多实例各写各的）：优先"该版本正在跑的实例端口"，
+  # 再回退默认端口，再回退旧命名 web-<版本>.log，最后回退任意端口的最新一份
+  local f="" cand p rp="" _pid _ver _dir _data _kind _id _unit _st
+  while IFS='|' read -r p _pid _ver _dir _data _kind _id _unit _st; do
+    [ -n "$p" ] || continue
+    [ "$_ver" = "$ver" ] && { rp="$p"; break; }
+  done <<< "$(instances_live)"
+  for cand in ${rp:+"$LOG_DIR/web-$ver-$rp.log"} "$LOG_DIR/web-$ver-$WEB_PORT.log" "$LOG_DIR/web-$ver.log"; do
+    [ -f "$cand" ] && { f="$cand"; break; }
+  done
+  if [ -z "$f" ]; then
+    f="$(ls -1t "$LOG_DIR"/web-"$ver"-*.log 2>/dev/null | head -1 || true)"
+  fi
+  [ -n "$f" ] || die "没有 $ver 的启动日志（该版本还没启动过？用 rdsh logs --clean 清理全部）"
 
   echo "日志文件（token 已打码显示）：$f"
   ls -la "$LOG_DIR" | sed 's/^/  /'
@@ -828,6 +1772,12 @@ cmd_fetch() {
 cmd_help() { sed -n '2,/^# =\{20,\}$/p' "$0"; }   # 打印头部文档块（不再依赖魔法行号）
 
 # ---- 入口 ----
+# 被投递到 systemd 单元执行时（自杀式停止），输出统一落盘，事后可查
+if [ -n "${DSH_STOP_LOG:-}" ]; then
+  exec >>"$DSH_STOP_LOG" 2>&1
+  log "（本次由 systemd 单元执行，日志：$DSH_STOP_LOG）"
+fi
+
 main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
@@ -839,6 +1789,9 @@ main() {
     ""|start|run ) shift || true; cmd_start "$@" ;;
     list|ls ) cmd_list ;;
     status ) cmd_status ;;
+    stop|down ) shift; cmd_stop "$@" ;;
+    debug ) shift; cmd_debug "$@" ;;
+    exec ) shift; cmd_exec "$@" ;;
     add ) shift; cmd_add "$@" ;;
     install ) shift; cmd_install "$@" ;;
     data ) shift; cmd_data "$@" ;;

@@ -2,6 +2,39 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.3.0 — 2026-09-26
+
+### 新增
+
+- **多实例：`rdsh run [目标]…`**（`start` 保留为等价别名）。
+  - **默认后台化**：走 `systemd-run --user --unit=dsh-web-<版本>-<端口>`，脱离终端与 DSH 自己的 cgroup（否则新实例会被旧实例的关停连带 dispose）。`--foreground` 回到"占着终端跑"的老行为。单元内部一律前台，并有 `DSH_LAUNCH_DETACHED` 兜底，结构上排除"套两层单元"。
+  - **端口默认加一**：取在跑实例的最大端口 +1（一个都没有则 3080）；`--port N` 指定起始、`--step N` 定步长（多目标依次递增）。
+  - **同一 `DSH_HOME` 拒绝双开**：多开会互相写 `workspace.json`/`settings`（会话级 flock 只保护单会话）。同版本多开走 `rdsh debug`。
+  - 启动后等端口就绪再回报，并**校验端口 owner 确实是我们的 dsh web** 才登记。
+- **`rdsh stop [目标|端口]`**：默认停"**端口最大的那一个**"（后进先出，与端口递增对称）；`--all` 从最大端口往小逐个停；`--dry-run` 只打印计划；`--timeout N`；`--probe` 只验证投递链路不发信号。
+  - **托管实例走 `systemctl --user stop <unit>`**（一次收掉整个 cgroup，含 pnpm 包装进程）；未托管回落 SIGTERM + 等端口释放 + 归属校验补刀。
+  - **自杀防护**：目标是本进程的祖先（就是你在用的那个实例）时，非交互环境直接拒绝；`--force` 确认后把自己投递到一次性 systemd 单元、延迟执行（`--delay`，默认 3s），让调用方先把当前回合落盘。
+- **实例注册表 `$BASE/.dsh-suite/run/instances/<端口>.kv`**：**注解层，不是真相**。真相永远是 `ss` + `/proc`（PID/cwd/`DSH_HOME` 现场读）；注册表只补 `ss` 查不到的字段（kind、debug id、systemd 单元名、日志、启动时间）。注解丢失不影响识别，过期条目自动退休到 `run/stale/`（不 `rm`）。附带好处：新版本一上来就能管住"没登记过的旧实例"。
+- **`rdsh debug`（可丢弃沙箱）**：`new|start|stop|ls|add|detach|rm|env`。
+  - `debug new` **默认全新**：建一个**完全空**的 `DSH_HOME`（不播种 `settings`、不链作者资产、不链凭据）。实测首启后只剩 dsh 自己的 `.anonymous-user-id`/`profiles`/`storages` + 一个空凭据文件，**0 个软链**。
+  - 按调试目的单独加料：`--assets`（软链作者资产）、`--creds`（软链凭据，读写同一份）、`--copy-creds`（独立复制并 `chmod 600` —— dsh 对凭据文件有"不得有组/其他位"的硬校验）；`detach` 反向摘掉，**只挪软链、真身不动**（前后快照逐字节一致）。
+  - `debug rm`：先停实例 → home + 清单整体挪进 `/tmp/rdsh-trash-debug-*` → 打印还原命令。**永不 `rm`**，且硬白名单只认 `$BASE/.dsh-suite/debug/` 下带清单的环境。
+  - **同版本多开的正路**：`debug new <版本> --tag t1 --start` 与 `--tag t2 --start` 各得一份独立 home 与端口。id 必须以字母开头，保证 `rdsh run <版本>` 永不撞上沙箱名。
+- **`rdsh exec <版本|debug-id> -- <命令>`**：在指定环境（检出 + `DSH_HOME`）里跑一次性命令。
+- `rdsh status` 升级为**实例表**：端口 / PID / 版本 / 检出 / `DSH_HOME` / URL / 单元 / 启动时间，标出 `debug:<id>` 与"← 你所在的实例"。
+
+### 变更
+
+- `rdsh run`/`start` **默认后台化**（老行为用 `--foreground`）；后台启动时**显式 `--setenv` 转发 `RDSH_*`/`DSH_*`** —— systemd 用户单元只继承 `PATH`/`HOME`/`XDG_RUNTIME_DIR`，**不继承自定义变量**（实测）。
+- **启动日志按端口分家**（`web-<版本>-<端口>.log`），`rdsh logs` 优先取"该版本在跑实例的端口"，再回退默认端口、再回退旧命名 `web-<版本>.log`。
+- **`rdsh-restart.sh` 适配 0.3.0** 并新增日志自兜底：dry-run 用 `--takeover` 放行"同一 home 已在跑"（重启本来就会停掉它），启动时加 `--foreground --takeover` 并**钉住 `--port "$PORT"`**（否则会被"最大端口+1"挪走）；调用方没给 `DSH_RESTART_LOG` 时**自己定一个**（先探可写，探不到就警告并继续）——此前经 `reboot` 插件触发的重启只进 journal，事后翻查麻烦。`DSH_RESTART_NOLOG=1` 可关。
+- **`migrate.sh` 探针 v2**（本机 2026-09-25 的改动，此前未发布，本次一并发布）：第 6 步改用 `compat-check` v2 的 CLI（`--home/--checkout/--scope/--selftest/--from`，可选 `--live` 实机实测门），退出码 = 最高严重度（P1：只提示不拦），旧版探针回退时明确告警。
+
+### 设计约束（都写进代码，不是写在文档里）
+
+- **归属校验是唯一红线**：只对过得了 `is_dsh_web_pid`（cmdline 是 web 入口 + cwd 是已管理检出或名字像 dsh 检出）的进程动手；**没有 `--force` 能覆盖这一条**；不用 `pkill/pgrep -f`；**绝不发 `-9`**。
+- **一切"停"都要能说清杀谁**：`--dry-run` 打印目标与依据（PID / cwd / 走 `systemctl` 还是 SIGTERM）。
+
 ## 0.2.2 — 2026-09-25
 
 ### 变更
