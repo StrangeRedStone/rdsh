@@ -76,23 +76,8 @@ if [ -z "$MANAGE_ROOT" ]; then
 fi
 RDSH_BIN="$MANAGE_ROOT/Rdsh.sh"
 
-# 落盘：调用方可用 DSH_RESTART_LOG 指定；**没指定就自己定一个**。
-# 为什么必须自兜底：2026-09-26 实测 reboot 插件投递单元时没设它，于是整段重启过程
-# 只进 journal，事后翻查麻烦、工具提示里的路径也不存在。自兜底让任何调用方都受益。
-# 关掉：DSH_RESTART_NOLOG=1（输出留在 stdout/journal）。
-if [ "${DSH_RESTART_NOLOG:-0}" != "1" ]; then
-  RESTART_LOG="${DSH_RESTART_LOG:-$LOG_DIR/restart-$TS.log}"
-  mkdir -p "$(dirname "$RESTART_LOG")" 2>/dev/null || true
-  # 先探可写（在子 shell 里试），成功再 exec —— exec 的重定向失败会让非交互 shell 直接退出，
-  # 那就变成了"为了记日志把重启搞挂"，本末倒置。
-  if ( umask 077; : >>"$RESTART_LOG" ) 2>/dev/null; then
-    DSH_RESTART_LOG="$RESTART_LOG"
-    exec >>"$DSH_RESTART_LOG" 2>&1
-    log "（本次运行由 systemd 单元执行，日志：$DSH_RESTART_LOG）"
-  else
-    warn "无法写入 $RESTART_LOG —— 本次输出只留在 stdout/journal（DSH_RESTART_LOG 可指定别处）"
-  fi
-fi
+# 注：日志落盘块**故意放在参数解析之后**（见下方"日志落盘"段）——
+# 早于此会把 `--help` 的输出也吞进文件，CI 的「干净 HOME 下 --help 必须非空」就是这么抓到的。
 
 # ---------------------------------------------------------------- 进程/端口工具
 port_listening() { ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . ; }
@@ -148,6 +133,29 @@ case "$TIMEOUT" in ''|*[!0-9]*) die "--timeout 需要非负整数，收到：$TI
 
 [ -x "$RDSH_BIN" ] || die "找不到可执行的 rdsh：$RDSH_BIN（用 RDSH_BASE 指定基目录）"
 command -v systemd-run >/dev/null || die "系统没有 systemd-run：本脚本强依赖它把新实例拉出 DSH 的 cgroup（见 --help 顶部说明）"
+
+# ------------------------------------------------------- 日志落盘（必须在参数解析之后）
+# 调用方可用 DSH_RESTART_LOG 显式指定；**没指定且在 systemd 单元里就自己定一个**。
+# 为什么自兜底：2026-09-26 实测 reboot 插件投递单元时没设它，于是整段重启过程只进 journal，
+#   事后翻查麻烦、工具提示里的路径也不存在。自兜底让任何调用方都受益。
+# 为什么限定"在单元里"（INVOCATION_ID 由 systemd 注入）：手动在终端跑 `--dry-run` 时
+#   不该被静默重定向到文件，用户要看屏幕。
+# 关掉：DSH_RESTART_NOLOG=1（输出留在 stdout/journal）。
+# 位置：放在参数解析之后，`--help` 才能正常打到 stdout（CI 第 2 步验的就是这个）。
+if [ "${DSH_RESTART_NOLOG:-0}" != "1" ] \
+   && { [ -n "${DSH_RESTART_LOG:-}" ] || [ -n "${INVOCATION_ID:-}" ]; }; then
+  RESTART_LOG="${DSH_RESTART_LOG:-$LOG_DIR/restart-$TS.log}"
+  mkdir -p "$(dirname "$RESTART_LOG")" 2>/dev/null || true
+  # 先探可写（在子 shell 里试），成功再 exec —— exec 的重定向失败会让非交互 shell 直接退出，
+  # 那就变成了"为了记日志把重启搞挂"，本末倒置。
+  if ( umask 077; : >>"$RESTART_LOG" ) 2>/dev/null; then
+    DSH_RESTART_LOG="$RESTART_LOG"
+    exec >>"$DSH_RESTART_LOG" 2>&1
+    log "（本次由 systemd 单元执行，日志：$DSH_RESTART_LOG）"
+  else
+    warn "无法写入 $RESTART_LOG —— 本次输出只留在 stdout/journal（DSH_RESTART_LOG 可指定别处）"
+  fi
+fi
 
 # --------------------------------------------------------- 逃生舱：投递到 systemd
 if [ "$DRY" = "0" ] && [ "$NO_DETACH" = "0" ] && [ "${DSH_RESTART_DETACHED:-0}" != "1" ] && inside_dsh; then
