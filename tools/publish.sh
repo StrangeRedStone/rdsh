@@ -16,6 +16,7 @@ REPO="$(dirname "$SELF_DIR")"                 # tools/ 的上一层 = 仓库根
 FROM="${RDSH_PUBLISH_FROM:-$HOME/Mapp/dsh}"    # 本机工作目录
 MODE=""
 DRY=0
+nfiles() { printf '%s\n' $FILES | wc -l; }   # 白名单文件数（不要用 printf '%s' $FILES | wc -w —— 多参不分离）
 
 # ---- 白名单：只有这些文件会被发布（写死，不用通配符扫目录） ----
 FILES="Rdsh.sh migrate.sh reindex-workspaces.sh plugin-sync.sh rdsh-restart.sh patch-manager.sh doctor.sh"
@@ -78,7 +79,7 @@ echo
 
 if [ "$MODE" = "check" ]; then
   if [ "$diff_n" -eq 0 ] && [ "$miss_n" -eq 0 ]; then
-    log "仓库与本机一致（检查了 $(printf '%s' $FILES | wc -w) 个白名单文件）"
+    log "仓库与本机一致（检查了 $(nfiles) 个白名单文件）"
     exit 0
   fi
   log "有 $diff_n 个文件需要 --stage"
@@ -94,7 +95,7 @@ fi
 for f in $FILES; do
   cp -p "$FROM/$f" "$REPO/$f"
 done
-log "已集中 $(printf '%s' $FILES | wc -w) 个文件进仓库"
+log "已集中 $(nfiles) 个文件进仓库"
 echo
 log "git status（应只涉及上面那些文件）："
 git -C "$REPO" status --short
