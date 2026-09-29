@@ -17,9 +17,27 @@ FROM="${RDSH_PUBLISH_FROM:-$HOME/Mapp/dsh}"    # 本机工作目录
 MODE=""
 DRY=0
 nfiles() { printf '%s\n' $FILES | wc -l; }   # 白名单文件数（不要用 printf '%s' $FILES | wc -w —— 多参不分离）
+# 守卫位置：仓库里优先，其次本机权威副本（首次发布时仓库里还没有它 —— 鸡生蛋）
+SCAN="$SELF_DIR/scan-secrets.sh"
+[ -f "$SCAN" ] || SCAN="$FROM/scan-secrets.sh"
+
+# 隐私守卫：搬运/提交**之前**扫一遍，有 error 就不许继续（不是"事后提醒"）
+scan_guard() {  # <模式: files|repo>
+  [ -f "$SCAN" ] || { warn "找不到隐私守卫 $SCAN → 未扫描（建议先补齐）"; return 0; }
+  local rc=0
+  if [ "$1" = "repo" ]; then
+    bash "$SCAN" --path "$REPO" --quiet || rc=$?
+  else
+    local -a args=()
+    local f
+    for f in $FILES; do args+=("$FROM/$f"); done
+    bash "$SCAN" --files "${args[@]}" --quiet || rc=$?
+  fi
+  return "$rc"
+}
 
 # ---- 白名单：只有这些文件会被发布（写死，不用通配符扫目录） ----
-FILES="Rdsh.sh migrate.sh reindex-workspaces.sh plugin-sync.sh rdsh-restart.sh patch-manager.sh doctor.sh"
+FILES="Rdsh.sh migrate.sh reindex-workspaces.sh plugin-sync.sh rdsh-restart.sh patch-manager.sh doctor.sh scan-secrets.sh"
 
 usage() {
   echo "publish.sh —— 把本机的 rdsh 脚本集中进发布仓库（单向：本机 -> 仓库）"
@@ -77,9 +95,27 @@ for f in $FILES; do
 done
 echo
 
+# 隐私守卫（白名单文件）：有 error 就中止，别等提交之后才发现
+if scan_guard files; then
+  :
+else
+  g_rc=$?
+  if [ "$g_rc" = "2" ]; then die '隐私守卫发现 error → 拒绝继续（先清理命中项）'; fi
+  warn '隐私守卫有 warn（不阻塞）：逐条确认后再提交'
+fi
+
 if [ "$MODE" = "check" ]; then
   if [ "$diff_n" -eq 0 ] && [ "$miss_n" -eq 0 ]; then
     log "仓库与本机一致（检查了 $(nfiles) 个白名单文件）"
+    # 顺带扫整个仓库：公开仓的文档/示例同样是泄漏面
+    if scan_guard repo; then
+      log '隐私守卫：仓库扫描干净'
+    else
+      case $? in
+        2) warn '隐私守卫：仓库里有 **error**（公开仓发布前必须清掉）'; exit 2 ;;
+        *) warn '隐私守卫：仓库里有 warn（不阻塞，提交前确认）' ;;
+      esac
+    fi
     exit 0
   fi
   log "有 $diff_n 个文件需要 --stage"

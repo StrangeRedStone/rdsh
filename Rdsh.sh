@@ -82,6 +82,11 @@
 #                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
 #                                         #   必报"检查了几个对象"，总数为 0 时报 error；
 #                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
+#   rdsh scan --path <目录> | --staged [--repo <目录>] | --files <文件>...
+#                                         # **隐私守卫**（转发 scan-secrets.sh）：扫私钥/令牌/凭据文件/
+#                                         #   会话数据（error）与绝对家目录/邮箱/大文件（warn）；
+#                                         #   报告不回显敏感值；必报"扫了几个文件"，0 个报 error；
+#                                         #   退出码 0 干净 / 1 有 warn / 2 有 error（--strict 把 warn 当 error）
 #   rdsh help
 #
 # 状态账本（state，B1 起）—— 回答"谁是什么角色"，是 rdsh 唯一的权威状态源：
@@ -3234,7 +3239,7 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     restore ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
@@ -3258,6 +3263,7 @@ main() {
     restore ) shift; cmd_restore "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
+    scan|secrets ) shift; exec "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;  # 转发到隐私守卫
     fetch|download|dl ) shift; cmd_fetch "$@" ;;
     help|-h|--help ) cmd_help ;;
     --dry-run|-n ) cmd_start "$@" ;;
