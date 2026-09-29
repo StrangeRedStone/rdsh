@@ -24,6 +24,13 @@ esac
 SRC="${1:-$(dirname "$(readlink -f "$0")")/../Rdsh.sh}"
 [ -f "$SRC" ] || { echo "找不到 Rdsh.sh: $SRC" >&2; exit 2; }
 
+# 前置校验：被测脚本必须真有本次要测的子命令。否则"其余参数一律当作 start 的目标"会把
+# 测试带进启动/交互路径 —— 表现为**挂死**（本批踩到：仓库里还是上一批的快照）。
+if ! bash "$SRC" help 2>/dev/null | grep -q 'rdsh state'; then
+  echo "被测脚本里没有 \`rdsh state\`（旧版本？先 publish --stage）：$SRC" >&2
+  exit 2
+fi
+
 T="$(mktemp -d)"; B="$T/base"
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
@@ -34,7 +41,7 @@ cp -p "$SRC" "$B/dsh/Rdsh.sh"
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
           -u DSH_LOG_DIR -u DSH_WEB_PORT \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@"; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
 
 # 假检出：版本号刻意避开真机在跑的版本，防止 ss/proc 的宿主状态混进来
 mkck() { # <目录名> <版本> [git]

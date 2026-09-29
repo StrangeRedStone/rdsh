@@ -22,7 +22,8 @@ BASE=~/Mapp
 # DEBUG_ROOT=~/Mapp/.dsh-suite/debug  # 调试沙箱（rdsh debug）
 
 # ── 其它 ───────────────────────────────────────────────────
-# RDSH_TRASH=/tmp                 # 「删除」的回收目录，永不 rm
+# TRASH_ROOT=~/Mapp/.dsh-suite/trash  # 回收站根（默认同 BASE 的文件系统；跨设备会慢）
+# RDSH_TRASH_KEEP_DAYS=7          # 回收项小于这个天数时，du --purge trash 要 --force
 # RDSH_REMOTE=https://github.com/deepseek-ai/deepseek-harness.git
 # RDSH_TAG_PREFIX=dsh-v           # 远端 tag 命名：dsh-v<版本>
 # RDSH_AUTO_INSTALL=1             # 启动时缺依赖自动 pnpm install

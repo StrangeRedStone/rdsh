@@ -33,7 +33,7 @@ cp -p "$SRC" "$B/dsh/doctor.sh"
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/doctor.sh" "$@"; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/doctor.sh" "$@" </dev/null; }
 # 造检出 + 数据 home（版本号避开真机在跑版本，防止宿主状态混入）
 mkck() { # <目录名> <版本>
   local d="$B/dsh/$1" h="$B/.dsh/$2"

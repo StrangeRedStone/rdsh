@@ -34,6 +34,8 @@
 | `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token；按端口分家） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
+| `rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]` | **衍生物账本**：回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 注册表陈旧 / 启动日志的体积与份数。**默认只列不删**；`--purge` 才是真删（备份类必须给 `--older-than`；回收项小于 `RDSH_TRASH_KEEP_DAYS`（默认 7 天）要 `--force`） |
+| `rdsh trash ls / restore <条目名\|--last> [--force]` | **回收站**（"永不 rm"的落点）：每个条目自带清单（原路径 / 体积 / 原因 / 逐项还原命令 / 跨设备标记）。`restore` 目标已存在则跳过不覆盖，`--force` 才腾位 |
 | `rdsh doctor [--only <维度,…>] [--json] [--quiet]` | **一键只读体检**（九个维度：检出 / 数据 home / 软链完整性 / 插件一致性 / 状态账本 / 实例 / 日志 / 磁盘内存 / 配置）。**必报"检查了几个对象"，总数为 0 时报 error**；退出码 `0` 无发现 / `1` 有 warn / `2` 有 error —— restore / retire / migrate 共用它 |
 | `rdsh state [list\|show\|role\|render\|sync\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
@@ -68,7 +70,8 @@ $BASE/
 └── .dsh-suite/           # 运行期状态（新件都在这一层，可用配置逐项改位置）
     ├── state/            #   状态账本：versions.kv + journal.log（唯一权威，700）
     ├── run/              #   实例注册表（注解层；真相是 ss + /proc）
-    └── debug/            #   调试沙箱（rdsh debug）
+    ├── debug/            #   调试沙箱（rdsh debug）
+    └── trash/            #   回收站：<时间戳>-<标签>/ + 清单（**与 BASE 同文件系统**）
 ```
 
 ## 依赖
@@ -114,7 +117,8 @@ rdsh start
 | `RDSH_SHARED_HOME` | `$BASE/.dsh-shared` | 作者资产稳定根 |
 | `RDSH_PLUGIN_ROOT` | `$BASE/dsh-plugins` | 插件权威副本 |
 | `DSH_LOG_DIR` | `$BASE/.dsh-logs` | 启动日志目录 |
-| `RDSH_TRASH` | `/tmp` | 「删除」的回收目录（永不 `rm`） |
+| `RDSH_TRASH` | `$BASE/.dsh-suite/trash` | 回收站根。**默认与 `BASE` 同文件系统** —— 跨设备 `mv` 会退化成"复制+删除"（慢、瞬时双份占用），旧默认 `/tmp` 还可能是 tmpfs（≈内存） |
+| `RDSH_TRASH_KEEP_DAYS` | `7` | 回收项小于这个天数时，`du --purge trash` 需要 `--force` |
 | `RDSH_STATE_ROOT` | `$BASE/.dsh-suite/state` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
 | `RDSH_RUN_DIR` | `$BASE/.dsh-suite/run` | 实例注册表（注解层，真相是 `ss` + `/proc`） |
 | `RDSH_DEBUG_ROOT` | `$BASE/.dsh-suite/debug` | 调试沙箱（`rdsh debug`） |
@@ -145,7 +149,8 @@ rdsh start
 ## 安全设计（原则 P1）
 
 1. **只检测、只留痕、只放行** —— 不替用户做不可逆决定，也不阻止用户做。
-2. **永不 `rm`** —— 删除一律先 `mv` 到回收目录，并在输出里说明去了哪。
+2. **默认永不 `rm`** —— 所有"删除"都先 `mv` 进回收站（`rdsh trash`），条目带清单与还原命令。
+   **唯一的真删**是 `rdsh du --purge`，五道约束：必须显式给类别 / 备份与 fetch 类必须给 `--older-than` / 没有 `--yes` 只预览 / 回收项小于 `RDSH_TRASH_KEEP_DAYS` 天要 `--force` / 路径必须在白名单内（回收站·备份·注册表陈旧·fetch 临时）。
 3. **幂等 + `--dry-run`** —— 任何写操作都能安全重跑；不覆盖已有数据，冲突只警告。
 4. **每个动作留证据** —— 备份目录带还原说明，基线进 `回退基线.md`，探针出报告。
 5. **不用 `pkill/pgrep -f`** —— 重启脚本只对 `ss` 给出的端口 owner PID 发 `SIGTERM`，且发信号前核对进程归属。

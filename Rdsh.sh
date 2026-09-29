@@ -55,6 +55,13 @@
 #   rdsh exec <版本|debug-id> -- <命令>    # 在指定环境里跑一次性命令
 #   rdsh data [-o] [版本|序号|项目名|路径] # 显示 / 打开数据目录
 #   rdsh backup [版本|序号]               # 备份数据目录到 $BASE/.dsh-backup/
+#   rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]
+#                                         # rdsh 衍生物账本：回收站/备份快照/调试沙箱/fetch 临时/
+#                                         #   注册表陈旧/启动日志的体积与份数。**默认只列不删**；
+#                                         #   --purge 才真删（backup/fetch 必须给 --older-than，
+#                                         #   trash 项小于 RDSH_TRASH_KEEP_DAYS=7 天要 --force）
+#   rdsh trash ls | restore <条目名|--last> [--force]
+#                                         # 回收站（永不 rm 的落点）：条目带清单与还原命令
 #   rdsh logs [-f] [版本|序号] [-o]       # 查看/打开启动日志（--clean 清理旧日志）
 #   rdsh base [路径] [--unset]            # 查看/设置基目录（只改 rdsh 的指向，不搬动任何数据）
 #   rdsh patch list|status|apply|revert|export  # 检出补丁管理（转发 patch-manager.sh）
@@ -124,6 +131,7 @@ _logdir="$(expand "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")"
 _run="$(expand "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")"
 _dbg="$(expand "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"
 _state="$(expand "${RDSH_STATE_ROOT:-$(cfg_get STATE_ROOT)}")"
+_trash="$(expand "${RDSH_TRASH:-$(cfg_get TRASH_ROOT)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/dsh}"
 # 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
@@ -154,6 +162,11 @@ STATE_KV="$STATE_ROOT/versions.kv"        # 当前真值（本工具唯一可写
 STATE_JOURNAL="$STATE_ROOT/journal.log"   # 只追加的事件流水（审计）
 STATE_HISTORY="$STATE_ROOT/回退基线-历史.md" # 迁移期手写历史的留档（首次 --init 时移入）
 BASELINE_MD="$BACKUP_ROOT/回退基线.md"     # 人读视图：由上面三者生成，不再手写
+# 回收站（"永不 rm" 的落点）。**默认与 BASE 同一文件系统**：跨设备 mv 会退化成"复制+删除"，
+# 慢且需要额外空间；旧默认 /tmp 还可能是 tmpfs（≈内存），搬 GB 级目录有 OOM 风险。
+TRASH_ROOT="${_trash:-$BASE/.dsh-suite/trash}"
+TRASH_INDEX="$TRASH_ROOT/index.log"        # 只追加的回收流水
+TRASH_KEEP_DAYS="${RDSH_TRASH_KEEP_DAYS:-7}" # 小于这个天数的回收项，purge 需要 --force
 # 调用期覆盖（由 --debug <id> 设置）：让 launch_* 用调试环境的 home / 登记 kind=debug
 ENTRY_HOME_OVERRIDE=""
 INSTANCE_KIND="real"
@@ -1120,7 +1133,7 @@ cmd_debug_rm() {  # <id> | --all | --older-than 7d
     case "$(debug_home "$x")" in "$DEBUG_ROOT"/*) ;; *) die "路径不在 $DEBUG_ROOT 下：$(debug_home "$x")" ;; esac
   done
   warn "将处理：$ids"
-  local p dest ts
+  local p
   for x in $ids; do
     p="$(debug_port_of "$x")"
     if [ -n "$p" ]; then
@@ -1132,15 +1145,19 @@ cmd_debug_rm() {  # <id> | --all | --older-than 7d
     fi
   done
   if [ "$dry" = "1" ]; then log '--dry-run：未删除任何东西。'; return 0; fi
-  ts="$(date +%Y%m%d-%H%M%S)"; dest="${RDSH_TRASH:-/tmp}/rdsh-trash-debug-$ts"
-  mkdir -p "$dest"
+  # 整个环境（home + 清单文件）作为**一个**回收条目挪走：清单里带逐项还原命令
+  local -a srcs=()
   for x in $ids; do
-    [ -e "$(debug_home "$x")" ] && mv "$(debug_home "$x")" "$dest/$x"
-    [ -e "$(debug_env_file "$x")" ] && mv "$(debug_env_file "$x")" "$dest/$x.env"
-    log "已挪走：$x"
+    [ -e "$(debug_home "$x")" ] && srcs+=("$(debug_home "$x")")
+    [ -e "$(debug_env_file "$x")" ] && srcs+=("$(debug_env_file "$x")")
   done
-  log "回收目录（永不 rm）：$dest"
-  printf '  还原：mv %s/<id> %s/ && mv %s/<id>.env %s/\n' "$dest" "$DEBUG_ROOT" "$dest" "$DEBUG_ROOT"
+  if [ "${#srcs[@]}" -gt 0 ]; then
+    trash_mv --label "debug-${ids// /+}" --reason "调试环境删除：$ids" "${srcs[@]}" || warn '回收条目创建失败'
+    log "已挪走：$ids"
+  else
+    warn '没有需要挪走的东西'
+  fi
+  log "还原：rdsh trash ls 看条目 → rdsh trash restore <条目>（或直接照 .rdsh-trash.kv 里的 restore.N 行）"
 }
 
 cmd_debug_env() {  # <id>：打印可直接 eval 的环境
@@ -1571,6 +1588,7 @@ cmd_base() {
   printf '  启动日志   : %s\n' "$LOG_DIR"
   printf '  实例注册表 : %s（注解层）\n' "$RUN_DIR"
   printf '  状态账本   : %s（唯一权威）\n' "$STATE_ROOT"
+  printf '  回收站     : %s（同文件系统：%s）\n' "$TRASH_ROOT" "$( [ -d "$TRASH_ROOT" ] && [ "$(trash_fs_of "$TRASH_ROOT")" = "$(trash_fs_of "$BASE")" ] && echo 是 || echo '否/待建' )"
   printf '  默认端口   : %s\n' "$WEB_PORT"
   [ -n "${RDSH_BASE:-}" ] && warn "环境变量 RDSH_BASE=$RDSH_BASE 正在覆盖配置文件（改配置不会生效）"
 
@@ -2200,18 +2218,333 @@ USAGE
   esac
 }
 
-# ---------------- fetch：从 GitHub 拉取指定版本的检出 ----------------
-rdsh_trash() {  # 失败/清理时把半成品挪走（不 rm；与 guard-rails 的约定一致）
-  local p="$1"
-  [ -e "$p" ] || return 0
-  local dest="${RDSH_TRASH:-/tmp}/rdsh-trash-$(basename "$p")-$(date +%s)"
-  mv "$p" "$dest" 2>/dev/null && warn "已移到回收目录：$dest" || warn "无法移动 $p，请手动处理"
+# ---------------- 回收站：带索引、默认同文件系统（永不 rm 的落点） ----------------
+# 布局：$TRASH_ROOT/<时间戳>-<标签>/{.rdsh-trash.kv, payload...}
+#   —— 每一件被"删除"的东西都进一个**带清单的条目目录**：清单里有原路径、体积、原因、
+#      跨设备标记与逐项的还原命令；清单写在条目目录里，**不污染被移动的内容**。
+#   —— 同一次操作可以带多个来源（如 `debug rm` 的 home + 清单文件）。
+#   —— 追加式流水 $TRASH_ROOT/index.log 供人 grep 与 du 统计。
+trash_fs_of()    { stat -c '%d' "$1" 2>/dev/null || echo 0; }
+trash_same_fs()  { [ "$(trash_fs_of "$1")" = "$(trash_fs_of "$2")" ]; }
+
+trash_mv() {  # [--label 名] [--reason 说明] [--quiet] <路径>...
+  local label="" reason="" quiet=0 a
+  local -a srcs=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --label)  shift; label="${1:-}" ;;
+      --reason) shift; reason="${1:-}" ;;
+      --quiet|-q) quiet=1 ;;
+      --label=*)  label="${a#--label=}" ;;
+      --reason=*) reason="${a#--reason=}" ;;
+      --)  shift; while [ $# -gt 0 ]; do srcs+=("$1"); shift; done; break ;;
+      *) srcs+=("$a") ;;
+    esac
+    shift || true
+  done
+  [ "${#srcs[@]}" -gt 0 ] || return 0
+  # 只保留真实存在的来源（不存在的静默跳过）
+  local -a have=()
+  local s
+  for s in "${srcs[@]}"; do [ -e "$s" ] || [ -L "$s" ] && have+=("$s"); done
+  [ "${#have[@]}" -gt 0 ] || return 0
+  [ -n "$label" ] || label="$(basename "${have[0]}")"
+  label="$(printf '%s' "$label" | tr -c 'A-Za-z0-9._-' '_')"
+  local ts at dest i=2 x dev=0 sz
+  ts="$(date +%Y%m%d-%H%M%S)"; at="$(date -Is)"
+  mkdir -p "$TRASH_ROOT" 2>/dev/null || { warn "无法创建回收站 $TRASH_ROOT"; return 1; }
+  dest="$TRASH_ROOT/$ts-$label"
+  while [ -e "$dest" ]; do dest="$TRASH_ROOT/$ts-$label-$i"; i=$((i+1)); done
+  trash_same_fs "$(dirname "${have[0]}")" "$TRASH_ROOT" || dev=1
+  if [ "$dev" = "1" ] && [ "$quiet" != "1" ]; then
+    warn "跨文件系统：${have[0]} → $TRASH_ROOT 会退化为「复制+删除」（慢、且瞬时占用双份空间）"
+    warn "  想避免：在 $BASE 下设 TRASH_ROOT（或把 BASE 换到同一文件系统）"
+  fi
+  if ! mkdir -p "$dest" 2>/dev/null; then warn "无法创建回收条目 $dest"; return 1; fi
+  local n=0 total="0" moved=0 items=""
+  for x in "${have[@]}"; do
+    local bn tgt; bn="$(basename "$x")"; tgt="$dest/$bn"; i=2
+    while [ -e "$tgt" ]; do tgt="$dest/$bn-$i"; i=$((i+1)); done
+    if mv "$x" "$tgt" 2>/dev/null; then
+      n=$((n+1)); sz="$(du -sh "$tgt" 2>/dev/null | cut -f1 || true)"
+      items="${items}orig.$n=$x
+dest.$n=$tgt
+size.$n=${sz:-?}
+restore.$n=mv $tgt $x
+"
+      moved=1
+    else
+      warn "无法移动：$x（权限？）→ 请手动处理"
+    fi
+  done
+  if [ "$moved" = "0" ]; then
+    rmdir "$dest" 2>/dev/null || true
+    warn '没有任何条目被移动'
+    return 1
+  fi
+  total="$(du -sh "$dest" 2>/dev/null | cut -f1 || echo '?')"
+  ( umask 077
+    { printf 'version=1\nat=%s\nlabel=%s\nreason=%s\ncount=%s\ntotal=%s\ncross_device=%s\n' \
+        "$at" "$label" "${reason:-—}" "$n" "$total" "$dev"
+      printf '%s' "$items"
+    } > "$dest/.rdsh-trash.kv"
+    printf '%s|%s|%s|%s|%s|%s\n' "$at" "$(basename "$dest")" "$label" "$total" "${reason:-—}" "$dev" >> "$TRASH_INDEX"
+  )
+  if [ "$quiet" != "1" ]; then
+    warn "已移到回收站：$dest"
+    warn "  还原：rdsh trash restore $(basename "$dest")    体积：$total"
+  fi
+  return 0
 }
-rdsh_trash_quiet() {  # 同 rdsh_trash，但成功路径上不吭声
-  local p="$1"
-  [ -e "$p" ] || return 0
-  mv "$p" "${RDSH_TRASH:-/tmp}/rdsh-trash-$(basename "$p")-$(date +%s)" 2>/dev/null || true
+rdsh_trash()       { trash_mv --reason "${2:-清理}" "$1"; }
+rdsh_trash_quiet() { trash_mv --quiet --reason "${2:-清理}" "$1"; }
+
+# ---------------- du：rdsh 衍生物账本（默认只列不删） ----------------
+# "退役要真释放磁盘"的另一半：只把东西挪进回收站，盘永远不释放。这里给一张账：
+#   回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 实例注册表陈旧项 / 启动日志
+# 原则：**默认只列**；`--purge` 才是真删，且必须带 `--older-than Nd`（trash 可省，表示全清），
+#       小于 TRASH_KEEP_DAYS(默认 7) 的回收项还要 `--force`；没有 `--yes` 只预览。
+du_size()   { [ -e "$1" ] || { printf '0'; return 0; }; du -sh "$1" 2>/dev/null | cut -f1 || echo '-'; }
+du_count()  {  # <glob 展开后的路径...> → 存在的项数。**不要用 `ls ... | wc -l`**：
+               # glob 无匹配时 ls 退 2，管道 + pipefail 会让 set -e 静默退出（本批踩到过）
+  local n=0 p
+  for p in "$@"; do [ -e "$p" ] || [ -L "$p" ] && n=$((n+1)); done
+  printf '%s' "$n"
 }
+du_size_paths() {  # <路径...> → 合计体积（无匹配输出 0）；别拿父目录的体积充当某一类的体积
+  local -a xs=()
+  local p
+  for p in "$@"; do [ -e "$p" ] || [ -L "$p" ] && xs+=("$p"); done
+  [ "${#xs[@]}" -gt 0 ] || { printf '0'; return 0; }
+  du -sch "${xs[@]}" 2>/dev/null | tail -1 | cut -f1 || printf '?'
+}
+du_oldest() { find "$1" -mindepth 1 -maxdepth 1 2>/dev/null | sort | head -1 | xargs -r stat -c '%y' 2>/dev/null | cut -d' ' -f1; }
+du_age_days() {  # <YYYY-MM-DD> → 天数（解析不了输出 -1）
+  local d="$1"; [ -n "$d" ] || { echo -1; return; }
+  local t; t="$(date -d "$d" +%s 2>/dev/null || echo '')"
+  [ -n "$t" ] || { echo -1; return; }
+  echo $(( ( $(date +%s) - t ) / 86400 ))
+}
+du_trash_at() { sed -nE 's/^at=(.*)T.*$/\1/p' "$1/.rdsh-trash.kv" 2>/dev/null | tail -1; }
+
+du_report_trash() {
+  if [ ! -d "$TRASH_ROOT" ]; then printf '  %-12s %s\n' '回收站' '（空）'; return 0; fi
+  local d n=0
+  printf '  %-12s %-8s %s\n' '回收站' "$(du_size "$TRASH_ROOT")" "$TRASH_ROOT"
+  for d in "$TRASH_ROOT"/*/; do
+    [ -d "$d" ] || continue
+    n=$((n+1))
+    local name at label total reason restored
+    name="$(basename "$d")"
+    at="$(sed -nE 's/^at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    label="$(sed -nE 's/^label=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    total="$(sed -nE 's/^total=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    reason="$(sed -nE 's/^reason=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    restored="$(sed -nE 's/^restored_at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    printf '      %-34s %-7s %-11s %s%s\n' "$name" "${total:--}" "${at%%T*}" "${reason:--}" \
+      "$([ -n "$restored" ] && printf '  [已还原 %s]' "${restored%%T*}")"
+    local o
+    while IFS= read -r o; do
+      [ -n "$o" ] && printf '        ← %s\n' "$o"
+    done < <(sed -nE 's/^orig\.[0-9]+=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null || true)
+  done
+  [ "$n" = "0" ] && printf '      %s\n' '（没有回收条目）'
+  return 0
+}
+
+cmd_du() {
+  local purge="" older="" yes=0 force=0 json=0 a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --purge) shift; purge="${1:-}" ;;
+      --purge=*) purge="${a#--purge=}" ;;
+      --older-than) shift; older="${1:-}" ;;
+      --older-than=*) older="${a#--older-than=}" ;;
+      --yes|-y) yes=1 ;;
+      --force) force=1 ;;
+      --json) json=1 ;;
+      -*) die "未知选项：$a（rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force]）" ;;
+      *) die "多余参数：$a" ;;
+    esac
+    shift || true
+  done
+  case "$purge" in
+    ""|trash|backup|fetch|stale|logs) ;;
+    debug) die '调试沙箱请走 rdsh debug rm（它会先停实例、且只认带清单的环境），不要用 du --purge 绕过它' ;;
+    *) die "未知类别：$purge（可选：trash / backup / fetch / stale / logs）" ;;
+  esac
+  if [ -n "$older" ]; then
+    case "${older%d}" in ''|*[!0-9]*) die "--older-than 形如 30d（收到：$older）" ;; esac
+  fi
+  local n_trash n_backup n_debug n_fetch n_stale n_logs
+  n_trash="$(du_count "$TRASH_ROOT"/*/)"
+  n_backup="$(du_count "$BACKUP_ROOT"/*/)"
+  n_debug="$(du_count "$DEBUG_ROOT"/*/)"
+  n_fetch="$(du_count "$MANAGE_ROOT"/.fetch-*)"
+  n_stale="$(du_count "$RUN_DIR"/stale/*)"
+  n_logs="$(du_count "$LOG_DIR"/web-*.log)"
+
+  if [ "$json" = "1" ]; then
+    printf '{"trash":{"count":%s,"size":"%s","root":"%s"},"backup":{"count":%s,"size":"%s"},"debug":{"count":%s,"size":"%s"},"fetch_tmp":{"count":%s,"size":"%s"},"run_stale":{"count":%s,"size":"%s"},"logs":{"count":%s,"size":"%s"}}\n' \
+      "$n_trash" "$(du_size "$TRASH_ROOT")" "$TRASH_ROOT" \
+      "$n_backup" "$(du_size "$BACKUP_ROOT")" "$n_debug" "$(du_size "$DEBUG_ROOT")" \
+      "$n_fetch" "$(du_size_paths "$MANAGE_ROOT"/.fetch-*)" "$n_stale" "$(du_size_paths "$RUN_DIR"/stale/*)" \
+      "$n_logs" "$(du_size_paths "$LOG_DIR"/web-*.log)"
+    return 0
+  fi
+
+  log "rdsh 衍生物账本（默认只列不删；真删要 --purge）+ [--older-than Nd] + --yes"
+  echo
+  du_report_trash
+  printf '  %-12s %-8s %-6s 最老：%s\n' '备份快照' "$(du_size "$BACKUP_ROOT")" "$n_backup 个目录" "$(du_oldest "$BACKUP_ROOT")"
+  printf '  %-12s %-8s %-6s （删除请用 rdsh debug rm）\n' '调试沙箱' "$(du_size "$DEBUG_ROOT")" "$n_debug 个环境"
+  printf '  %-12s %-8s %-6s 半成品检出\n' 'fetch 临时' "$(du_size_paths "$MANAGE_ROOT"/.fetch-*)" "$n_fetch 个残留"
+  printf '  %-12s %-8s %-6s 过期注解\n' '注册表陈旧' "$(du_size_paths "$RUN_DIR"/stale/*)" "$n_stale 个"
+  printf '  %-12s %-8s %-6s （清理：rdsh logs --clean）\n' '启动日志' "$(du_size_paths "$LOG_DIR"/web-*.log)" "$n_logs 个"
+  echo
+  printf '  分区余量：%s\n' "$(df -h "$BASE" 2>/dev/null | tail -1 | awk '{print $4" 可用（"$5" 已用）"}')"
+
+  [ -n "$purge" ] || { echo; log "只读模式。真删示例：rdsh du --purge trash --older-than 30d --yes"; return 0; }
+
+  # ---- purge：先列"将删什么"，再要 --yes ----
+  local -a victims=()
+  local p age
+  case "$purge" in
+    trash)
+      for p in "$TRASH_ROOT"/*/; do
+        [ -d "$p" ] || continue
+        if [ -n "$older" ]; then
+          age="$(du_age_days "$(du_trash_at "$p")")"
+          [ "$age" -ge "${older%d}" ] 2>/dev/null && victims+=("$p")
+        else
+          victims+=("$p")
+        fi
+      done ;;
+    backup)
+      if [ -z "$older" ]; then
+        warn 'backup 必须给 --older-than Nd（备份是资产，不点名的删除不许裸跑）—— 本次只列不删'
+        for p in "$BACKUP_ROOT"/*/; do [ -d "$p" ] && printf '    %-10s %s\n' "$(du_size "$p")" "$p"; done
+        return 1
+      fi
+      for p in "$BACKUP_ROOT"/*/; do
+        [ -d "$p" ] || continue
+        age="$(du_age_days "$(stat -c '%y' "$p" 2>/dev/null | cut -d' ' -f1)")"
+        [ "$age" -ge "${older%d}" ] 2>/dev/null && victims+=("$p")
+      done ;;
+    fetch)
+      if [ -z "$older" ]; then
+        warn 'fetch 必须给 --older-than Nd（避免删掉正在进行的下载）—— 本次只列不删'
+        for p in "$MANAGE_ROOT"/.fetch-*; do [ -e "$p" ] && printf '    %-10s %s\n' "$(du_size "$p")" "$p"; done
+        return 1
+      fi
+      for p in "$MANAGE_ROOT"/.fetch-*; do
+        [ -e "$p" ] || continue
+        age="$(du_age_days "$(stat -c '%y' "$p" 2>/dev/null | cut -d' ' -f1)")"
+        [ "$age" -ge "${older%d}" ] 2>/dev/null && victims+=("$p")
+      done ;;
+    stale)
+      for p in "$RUN_DIR"/stale/*; do
+        [ -e "$p" ] || continue
+        victims+=("$p")
+      done ;;
+    logs)
+      warn '日志请用 rdsh logs --clean（它按设计只清内容、不删文件）'
+      return 1 ;;
+  esac
+  if [ "${#victims[@]}" -eq 0 ]; then
+    warn "没有符合条件的项（类别 $purge$([ -n "$older" ] && printf '，年龄 ≥ %s' "$older")）"
+    return 0
+  fi
+  local v
+  for v in "${victims[@]}"; do printf '    %-10s %s\n' "$(du_size "$v")" "$v"; done
+  echo
+  if [ "$yes" != "1" ]; then
+    log "预览模式（没有 --yes）：上面就是要真删的 ${#victims[@]} 项。真删：加 --yes"
+    return 0
+  fi
+  local failed=0 keepd="$TRASH_KEEP_DAYS"
+  for v in "${victims[@]}"; do
+    case "$v" in
+      "$TRASH_ROOT"/*|"$BACKUP_ROOT"/*|"$RUN_DIR"/stale/*|"$MANAGE_ROOT"/.fetch-*) ;;
+      *) warn "拒绝删除白名单外的路径：$v"; failed=$((failed+1)); continue ;;
+    esac
+    if [ "$purge" = "trash" ]; then
+      local age_d; age_d="$(du_age_days "$(du_trash_at "$v")")"
+      if [ "${age_d:--1}" -ge 0 ] && [ "$age_d" -lt "$keepd" ] && [ "$force" != "1" ]; then
+        warn "跳过（$age_d 天 < ${keepd} 天，要删加 --force）：$(basename "$v")"; continue
+      fi
+    fi
+    rm -rf "$v" && log "已删除：$v" || { warn "删除失败：$v"; failed=$((failed+1)); }
+  done
+  ( umask 077; printf '%s|purge|%s|older=%s force=%s\n' "$(date -Is)" "$purge" "${older:-无}" "$force" >> "$TRASH_INDEX" )
+  if [ "$failed" = "0" ]; then
+    log 'purge 完成'
+    printf '  释放后分区余量：%s\n' "$(df -h "$BASE" 2>/dev/null | tail -1 | awk '{print $4" 可用"}')"
+  else
+    warn "$failed 项未删除"; return 1
+  fi
+}
+
+# ---------------- trash：回收站的查看与还原 ----------------
+cmd_trash() {
+  local sub="ls"
+  if [ $# -gt 0 ]; then sub="$1"; shift; fi
+  case "$sub" in
+    # 注意：不要写 `[ $# -gt 0 ] && shift` —— 无参数时它返回 1，set -e 会直接退出
+    ls|list) log "回收站：$TRASH_ROOT（流水：$TRASH_INDEX）"; du_report_trash ;;
+    restore)
+      local sel="${1:-}" force=0
+      [ "${2:-}" = "--force" ] && force=1
+      [ -n "$sel" ] || die '用法: rdsh trash restore <条目名|--last> [--force]'
+      [ -d "$TRASH_ROOT" ] || die "没有回收站（$TRASH_ROOT）"
+      local entry=""
+      if [ "$sel" = "--last" ]; then
+        entry="$(ls -1dt "$TRASH_ROOT"/*/ 2>/dev/null | sed -n '1p' || true)"
+      else
+        case "$sel" in "$TRASH_ROOT"/*) entry="$sel" ;; *) entry="$TRASH_ROOT/$sel" ;; esac
+      fi
+      [ -d "$entry" ] || die "找不到回收条目：$sel（rdsh trash ls 看全部）"
+      local mf="$entry/.rdsh-trash.kv"
+      [ -f "$mf" ] || die "该条目没有清单（$mf）—— 不是 rdsh 建的条目，请手工处理"
+      log "还原条目：$(basename "$entry")"
+      local i=1 orig dest moved=0 skipped=0
+      while :; do
+        orig="$(sed -nE "s/^orig\\.$i=(.*)$/\\1/p" "$mf" | tail -1)"
+        dest="$(sed -nE "s/^dest\\.$i=(.*)$/\\1/p" "$mf" | tail -1)"
+        [ -n "$orig" ] || break
+        if [ -e "$orig" ] && [ "$force" != "1" ]; then
+          warn "目标已存在，跳过（不覆盖；要覆盖加 --force）：$orig"; skipped=$((skipped+1)); i=$((i+1)); continue
+        fi
+        if [ -e "$dest" ]; then
+          mkdir -p "$(dirname "$orig")"
+          [ "$force" = "1" ] && [ -e "$orig" ] && rdsh_trash_quiet "$orig"
+          if mv "$dest" "$orig"; then log "  已还原：$orig"; moved=$((moved+1)); else warn "  还原失败：$orig"; fi
+        fi
+        i=$((i+1))
+      done
+      ( umask 077; printf 'restored_at=%s\n' "$(date -Is)" >> "$mf" )
+      log "还原完成：$moved 项$([ "$skipped" -gt 0 ] && printf '，跳过 %s 项' "$skipped")"
+      log '（条目目录保留作痕迹；rdsh du --purge trash 可清理）'
+      ;;
+    -h|--help|help)
+      cat <<'USAGE'
+rdsh trash —— 回收站（"永不 rm" 的落点）
+
+用法:
+  rdsh trash ls                            列出条目（时间 / 标签 / 体积 / 原因 / 原路径 / 是否已还原）
+  rdsh trash restore <条目名|--last> [--force]
+                                           按清单逐项还原；目标已存在则跳过（不覆盖），--force 才腾位
+
+布局: $TRASH_ROOT/<时间戳>-<标签>/{.rdsh-trash.kv, <被移动的东西>}
+      清单含 orig.N / dest.N / size.N / restore.N 与跨设备标记；真删走 rdsh du --purge trash
+USAGE
+      ;;
+    *) die '用法: rdsh trash [ls|restore <条目名|--last> [--force]]' ;;
+  esac
+}
+
 remote_tags_git() {  # git 协议列举（备选；某些网络对 git over HTTPS 不友好）
   command -v git >/dev/null || return 1
   timeout "${RDSH_FETCH_TIMEOUT:-60}" git ls-remote --tags --refs "$REMOTE_URL" 2>/tmp/rdsh-ls-remote.err \
@@ -2358,7 +2691,7 @@ main() {
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
     base|fetch|help|-h|--help|doctor ) : ;;
-    state ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -2375,6 +2708,8 @@ main() {
     logs|log ) shift; cmd_logs "$@" ;;
     base|root ) shift; cmd_base "$@" ;;
     state ) shift; cmd_state "$@" ;;
+    du ) shift; cmd_du "$@" ;;
+    trash|trashcan ) shift; cmd_trash "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     fetch|download|dl ) shift; cmd_fetch "$@" ;;
