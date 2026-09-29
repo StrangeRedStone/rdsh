@@ -82,6 +82,12 @@
 #                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
 #                                         #   必报"检查了几个对象"，总数为 0 时报 error；
 #                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
+#   rdsh bridge --spec [--json]          # **门面契约**：把能力清单交给 dsh 插件
+#                                         #   （作法：功能靠脚本、界面靠插件；插件只是注册器）
+#   rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--timeout N] [--force] [--log <文件>]
+#                                         # 重启入口（转发 rdsh-restart.sh —— 真正的逻辑在那：
+#                                         #   systemd-run 逃逸舱 + 等端口释放 + 无人值守 headless 接手）
+#   rdsh wake ls | show <会话id>          # **只读**看唤醒台账：重启后要续转哪些会话
 #   rdsh settings show|keys|carry|register
 #                                         # settings.yaml：**每版本一份真文件**（顶层键随 schema 变，
 #                                         #   不做稳定根软链）；carry 是 schema 感知携带；登记进账本
@@ -2895,9 +2901,11 @@ cmd_trash() {
     # 注意：不要写 `[ $# -gt 0 ] && shift` —— 无参数时它返回 1，set -e 会直接退出
     ls|list) log "回收站：$TRASH_ROOT（流水：$TRASH_INDEX）"; du_report_trash ;;
     restore)
-      local sel="${1:-}" force=0
-      [ "${2:-}" = "--force" ] && force=1
-      [ -n "$sel" ] || die '用法: rdsh trash restore <条目名|--last> [--force]'
+      local sel="${1:-}" force=0 dry=0 a2
+      for a2 in "$@"; do
+        case "$a2" in --force) force=1 ;; --dry-run|-n) dry=1 ;; esac
+      done
+      [ -n "$sel" ] || die '用法: rdsh trash restore <条目名|--last> [--force] [--dry-run]'
       [ -d "$TRASH_ROOT" ] || die "没有回收站（$TRASH_ROOT）"
       local entry=""
       if [ "$sel" = "--last" ]; then
@@ -2908,7 +2916,7 @@ cmd_trash() {
       [ -d "$entry" ] || die "找不到回收条目：$sel（rdsh trash ls 看全部）"
       local mf="$entry/.rdsh-trash.kv"
       [ -f "$mf" ] || die "该条目没有清单（$mf）—— 不是 rdsh 建的条目，请手工处理"
-      log "还原条目：$(basename "$entry")"
+      log "还原条目：$(basename "$entry")$([ "$dry" = "1" ] && printf '（--dry-run：只出计划，不动任何文件）')"
       local i=1 orig dest moved=0 skipped=0
       while :; do
         orig="$(sed -nE "s/^orig\\.$i=(.*)$/\\1/p" "$mf" | tail -1)"
@@ -2921,7 +2929,13 @@ cmd_trash() {
         if [ -e "$dest" ] || [ -L "$dest" ]; then
           mkdir -p "$(dirname "$orig")"
           if [ "$force" = "1" ] && { [ -e "$orig" ] || [ -L "$orig" ]; }; then rdsh_trash_quiet "$orig"; fi
-          if mv "$dest" "$orig"; then log "  已还原：$orig"; moved=$((moved+1)); else warn "  还原失败：$orig"; fi
+          if [ "$dry" = "1" ]; then
+            log "  [dry-run] 将还原：$orig（来自 $(basename "$dest")）"; moved=$((moved+1))
+          elif mv "$dest" "$orig"; then
+            log "  已还原：$orig"; moved=$((moved+1))
+          else
+            warn "  还原失败：$orig"
+          fi
         fi
         i=$((i+1))
       done
@@ -3629,6 +3643,198 @@ cmd_retire() {
   [ "$failed" = "0" ] || { warn "$failed 个目标未退役"; return 1; }
 }
 
+# ---------------- bridge：给 dsh 插件的**门面契约**（B9） ----------------
+# 作法：**功能靠外部脚本，界面靠 dsh 插件**。
+#   于是插件不该自己实现任何逻辑 —— 它只需要知道"rdsh 有哪些能力、怎么调、危险等级"。
+#   这里把能力清单变成**机器可读契约**（`rdsh bridge --spec --json`），插件只是一个注册器：
+#   读清单 → 一个能力注册一个工具 → 每次调用都 `bash Rdsh.sh <子命令> <参数>`。
+#   好处：加一个 rdsh 子命令**不用改插件**；危险能力在契约里就标好了默认 dry-run / 要显式 apply。
+BRIDGE_SPEC_VERSION=1
+
+bridge_spec_rows() {  # 每行：id|子命令|参数|风险|默认参数|简介
+  cat <<'ROWS'
+rdsh_list|list||read||列出已管理的所有 dsh 版本（键/角色/检出/数据 home）
+rdsh_doctor|doctor|[--only <维度,…>] [--json]|read|--quiet|九维只读体检（环境/检出/数据/插件/账本/链接/日志/配置/磁盘）
+rdsh_state|state list||read||看状态账本：每个对象的角色、安装时间、commit、检出与数据 home
+rdsh_scan|scan|--path <目录> / --files <文件…>|read||隐私守卫（私钥/令牌/凭据/会话数据 error；家目录/邮箱/大文件 warn）
+rdsh_settings|settings show||read||看各版本 settings.yaml 的路径、顶层键、与账本指纹是否一致
+rdsh_wake|wake ls||read||看唤醒台账：重启后会续转哪些会话
+rdsh_du|du||read||磁盘台账：各版本/数据/快照/回收站占了多少（不动手）
+rdsh_backup|backup|<目标…> [--snapshot] [--dry-run]|write|--dry-run|数据 home 快照/备份（硬链接增量）；默认 dry-run，去掉 --dry-run 才落盘
+rdsh_restore|restore|<目标> [--type data/assets/state] [--list] [--dry-run]|write|--dry-run|从快照/回收站/git 恢复；先挪后写，默认 dry-run
+rdsh_trash_ls|trash ls||read||看回收站条目（时间/标签/体积/原因/原路径/是否已还原）
+rdsh_trash_restore|trash restore|--last / <条目名> [--force]|write|--last --dry-run|按清单整份还原（退役与恢复的后路）；目标已存在会跳过，--force 才腾位
+rdsh_retire|retire|<目标…> [--apply] [--force]|destructive||退役一个版本（五类足迹）；**默认只出计划**，--apply 才动，--force 才碰回退基线/最后一版
+rdsh_restart|restart|[<目标>] [--dry-run] [--probe]|destructive|--dry-run|重启当前 dsh（转发 rdsh-restart.sh）；默认 dry-run，真重启要显式去掉
+ROWS
+}
+
+cmd_bridge() {
+  local sub="" json=0 a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      --spec|spec|list|ls) sub=spec ;;
+      -h|--help|help) sub=help ;;
+      *) die "未知参数：$a（rdsh bridge --spec [--json]）" ;;
+    esac
+  done
+  [ -n "$sub" ] || sub=spec
+  case "$sub" in
+    spec|list)
+      local id sc args risk def summary nf
+      # 自检：清单行必须正好 6 字段（参数里若写了 | 会静默错位——本文件就踩过）
+      while IFS= read -r _row; do
+        [ -n "$_row" ] || continue
+        nf="$(printf '%s' "$_row" | awk -F'|' '{print NF}')"
+        [ "$nf" = "6" ] || die "bridge 契约格式错误：期望 6 字段，实际 $nf —— $_row"
+      done < <(bridge_spec_rows)
+      if [ "$json" = "1" ]; then
+        printf '{\n'
+        printf '  "version": %s,\n' "$BRIDGE_SPEC_VERSION"
+        printf '  "tool": "rdsh",\n'
+        printf '  "entry": "%s",\n' "$MANAGE_ROOT/Rdsh.sh"
+        printf '  "manage_root": "%s",\n' "$MANAGE_ROOT"
+        printf '  "base": "%s",\n' "$BASE"
+        printf '  "note": "插件只做门面：读本清单注册工具，调用时执行 bash <entry> <subcommand> [args]。危险能力在 spec 里已标好默认 dry-run 与是否需要显式 apply。",\n'
+        printf '  "capabilities": [\n'
+        local first=1
+        while IFS='|' read -r id sc args risk def summary; do
+          [ -n "$id" ] || continue
+          [ "$first" = "1" ] || printf ',\n'
+          first=0
+          printf '    { "id": "%s", "subcommand": "%s", "args": "%s", "risk": "%s", "default_args": "%s", "summary": "%s" }' \
+            "$id" "$sc" "$args" "$risk" "$def" "$summary"
+        done < <(bridge_spec_rows)
+        printf '\n  ]\n}\n'
+      else
+        log "rdsh 门面契约 v$BRIDGE_SPEC_VERSION（机器可读版：rdsh bridge --spec --json）"
+        printf '  %-16s %-14s %-9s %s\n' '能力 id' '子命令' '风险' '默认参数'
+        while IFS='|' read -r id sc args risk def summary; do
+          [ -n "$id" ] || continue
+          printf '  %-16s %-14s %-9s %s\n' "$id" "$sc" "$risk" "${def:--}"
+        done < <(bridge_spec_rows)
+        printf '\n  约定：插件读清单 → 一个能力注册一个工具 → 调用 `bash %s <子命令> <参数>`。\n' "$MANAGE_ROOT/Rdsh.sh"
+        printf '  风险等级：read（只读）/ write（改盘，默认 dry-run）/ destructive（破坏性，默认只出计划或 dry-run）。\n'
+      fi
+      ;;
+    -h|--help|help)
+      cat <<'USAGE'
+rdsh bridge —— 给 dsh 插件的门面契约（不作实际动作）
+
+用法:
+  rdsh bridge --spec           人类可读的能力清单
+  rdsh bridge --spec --json    机器可读（插件据此注册工具）
+
+约定（作法：功能靠脚本，界面靠插件）:
+  * 能力清单由 rdsh **声明**；插件只是注册器 —— 加一个 rdsh 子命令不用改插件。
+  * 插件调用形如：bash "<entry>" <subcommand> <args…>（entry 见 --json 的 entry 字段）。
+  * 风险等级 read / write / destructive；write 默认带 --dry-run，destructive 默认只出计划，
+    真要动必须显式传 --apply 或去掉 --dry-run —— 门面不替用户变默认。
+USAGE
+      ;;
+    *) die '用法: rdsh bridge --spec [--json]' ;;
+  esac
+}
+
+# ---------------- restart / wake：重启与"唤醒台账"（B9：把重启能力显式纳入 rdsh） ----------------
+# 分工（作法）：**功能靠脚本，界面靠插件**。
+#   真正干活的一直是 rdsh-restart.sh（systemd-run 逃逸舱 + 等端口 + 无人值守 headless 接手）；
+#   dsh 插件只提供工具/命令/按钮与审批。这里把它的入口与"唤醒台账"在 rdsh 侧显式化，
+#   于是不依赖 dsh 也能重启、也能看清"重启后要续转什么"。
+WAKES_DIR_NAME="wake"     # 与 reboot 插件约定的台账目录：<数据 home>/wake/<sessionId>.json
+
+cmd_restart() {
+  local log="" a
+  local -a pass=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --log) shift; log="${1:-}" ;;
+      --log=*) log="${a#--log=}" ;;
+      --dry-run|-n|--probe|--force|--no-detach) pass+=("$a") ;;
+      --delay|--timeout) pass+=("$a"); shift; pass+=("${1:-}") ;;
+      --delay=*|--timeout=*) pass+=("$a") ;;
+      -*) die "未知选项：$a（rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--timeout N] [--force] [--no-detach] [--log <文件>]）" ;;
+      *) pass+=("$a") ;;
+    esac
+    shift || true
+  done
+  local script="$MANAGE_ROOT/rdsh-restart.sh"
+  [ -f "$script" ] || die "找不到重启脚本：$script"
+  # 输出落点：脚本在"由 systemd 单元托管的 dsh 里"跑时会把输出重定向到日志文件
+  # （INVOCATION_ID 存在即视为单元内），stdout 会**静默**——所以这里显式给一个日志路径，
+  # 调用后再把日志尾部路出来，免得用户以为命令没反应。
+  local deflog="$LOG_DIR/restart-$(date +%Y%m%d-%H%M%S).log"
+  [ -f "$(dirname "$deflog")" ] || mkdir -p "$(dirname "$deflog")" 2>/dev/null || true
+  local uselog="${log:-$deflog}"
+  log "转发到 $script（真正的重启逻辑在那；本命令只是 rdsh 的统一入口）"
+  log "输出落点：$uselog"
+  local rc=0
+  DSH_RESTART_LOG="$uselog" bash "$script" "${pass[@]:-}" || rc=$?
+  if [ -f "$uselog" ]; then
+    printf '  ── 日志尾部（%s）──\n' "$uselog"
+    tail -12 "$uselog" | sed 's/^/  /'
+  fi
+  return "$rc"
+}
+
+wake_files() {  # 所有已管理数据 home 下的唤醒台账文件（每行一条绝对路径）
+  local e home
+  for e in "${ENTRIES[@]:-}"; do
+    [ -n "$e" ] || continue
+    home="$(entry_field "$e" 4)"
+    [ -d "$home/$WAKES_DIR_NAME" ] || continue
+    find "$home/$WAKES_DIR_NAME" -maxdepth 1 -name '*.json' -type f 2>/dev/null | sort || true
+  done
+}
+
+cmd_wake() {
+  local sub="${1:-ls}"
+  if [ $# -gt 0 ]; then shift; fi
+  case "$sub" in
+    ls|list)
+      local f n=0
+      log "唤醒台账（重启/排程后要续转的会话；由 dsh 插件或 rdsh 写入，这里只读）"
+      while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        n=$((n+1))
+        if command -v jq >/dev/null 2>&1; then
+          printf '  %s\n' "$(jq -r '"    会话 \(.sessionId)  原因 \(.reason)  登记 \((.createdAt/1000|todate))  尝试 \(.attempts)/\(.maxAttempts)  由 \(.createdBy)"' "$f" 2>/dev/null || printf '    %s' "$f")"
+          printf '      提示：%s\n' "$(jq -r '.prompt // ""' "$f" 2>/dev/null | head -1 | cut -c1-100)"
+          local nb; nb="$(jq -r '.notBefore // empty' "$f" 2>/dev/null || true)"
+          [ -n "$nb" ] && printf '      不早于：%s\n' "$(date -d "@$((nb/1000))" '+%F %T' 2>/dev/null || printf '%s' "$nb")"
+        else
+          printf '  %s（%s 字节；装 jq 可格式化）\n' "$f" "$(stat -c %s "$f" 2>/dev/null || echo '?')"
+        fi
+      done < <(wake_files)
+      [ "$n" = "0" ] && printf '  （空）\n'
+      printf '  台账落点：<数据 home>/%s/<会话id>.json\n' "$WAKES_DIR_NAME"
+      ;;
+    show)
+      local id="${1:?用法: rdsh wake show <会话id>}"
+      local hit=""
+      while IFS= read -r f; do case "$(basename "$f")" in *"$id"*) hit="$f" ;; esac; done < <(wake_files)
+      [ -n "$hit" ] || die "台账里没有匹配 “$id” 的会话"
+      log "台账：$hit"
+      if command -v jq >/dev/null 2>&1; then jq . "$hit"; else cat "$hit"; fi
+      ;;
+    -h|--help|help)
+      cat <<'USAGE'
+rdsh wake —— 只看唤醒台账（问："重启后会续转什么"）
+
+用法:
+  rdsh wake ls                 列出所有唤醒条目（会话/原因/登记时间/尝试次数/提示摘要）
+  rdsh wake show <会话id>      看某条的完整 JSON
+
+说明: 台账由 dsh 插件（reboot）或 rdsh 写入，目录 <数据 home>/wake/<会话id>.json；
+      本命令**只读**。真正重启走 `rdsh restart`（转发 rdsh-restart.sh）。
+USAGE
+      ;;
+    *) die '用法: rdsh wake [ls|show <会话id>]' ;;
+  esac
+}
+
 remote_tags_git() {  # git 协议列举（备选；某些网络对 git over HTTPS 不友好）
   command -v git >/dev/null || return 1
   timeout "${RDSH_FETCH_TIMEOUT:-60}" git ls-remote --tags --refs "$REMOTE_URL" 2>/tmp/rdsh-ls-remote.err \
@@ -3796,9 +4002,10 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|restart|bridge ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     restore|retire|settings|setting ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    wake ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -3820,6 +4027,9 @@ main() {
     restore ) shift; cmd_restore "$@" ;;
     retire ) shift; cmd_retire "$@" ;;
     settings|setting ) shift; cmd_settings "$@" ;;
+    restart ) shift; cmd_restart "$@" ;;
+    bridge ) shift; cmd_bridge "$@" ;;
+    wake ) shift; cmd_wake "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     scan|secrets ) shift; exec "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;  # 转发到隐私守卫
