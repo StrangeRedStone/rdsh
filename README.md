@@ -34,7 +34,8 @@
 | `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token；按端口分家） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
-| `rdsh state [list\|show\|role\|render\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
+| `rdsh doctor [--only <维度,…>] [--json] [--quiet]` | **一键只读体检**（九个维度：检出 / 数据 home / 软链完整性 / 插件一致性 / 状态账本 / 实例 / 日志 / 磁盘内存 / 配置）。**必报"检查了几个对象"，总数为 0 时报 error**；退出码 `0` 无发现 / `1` 有 warn / `2` 有 error —— restore / retire / migrate 共用它 |
+| `rdsh state [list\|show\|role\|render\|sync\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
 
 > `start` 与 `run` 等价（兼容别名）。多实例归属靠"**端口 + DSH_HOME**"两个维度：

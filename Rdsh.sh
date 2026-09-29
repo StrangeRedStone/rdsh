@@ -63,6 +63,11 @@
 #   rdsh fetch <版本> [--dir <名>] [--tarball] [--full] [--install] [--dry-run]
 #                                         # 拉取指定版本检出到 $BASE/dsh/（默认 git clone --depth 1，与官方源码装法一致，
 #                                         #   后续 rdsh patch export / 上游 diff 可用；--tarball 改走归档：更小更稳但无 .git）
+#   rdsh doctor [--only <维度,…>] [--json] [--quiet]
+#                                         # 一键**只读**体检（转发 doctor.sh）：检出/数据 home/软链完整性/
+#                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
+#                                         #   必报"检查了几个对象"，总数为 0 时报 error；
+#                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
 #   rdsh help
 #
 # 状态账本（state，B1 起）—— 回答"谁是什么角色"，是 rdsh 唯一的权威状态源：
@@ -70,6 +75,7 @@
 #   rdsh state show <目标>                # 看某个对象的全部字段
 #   rdsh state role <目标> <角色>         # 改角色：current|baseline|retire-candidate|retired
 #   rdsh state render                     # 重新生成 $BACKUP_ROOT/回退基线.md（人读视图）
+#   rdsh state sync [<目标>|--all]        # 把账本回写成各检出的 .installed（刷新回声）
 #   rdsh state journal [-n N]             # 看事件流水（只追加，永不改写历史）
 #   rdsh state --init [--dry-run]         # 首次播种：从现有检出 + 旧 回退基线.md 反向推断，
 #                                         #   逐条打印它推断了什么；旧手写历史移入
@@ -1891,6 +1897,28 @@ state_baseline_hint_from_md() {  # <旧回退基线.md> → 推"最后一条回�
   printf '%s' "$v"
 }
 
+state_sync() {  # [<目标>|--all]：把账本回写成 .installed（刷新回声）+ 补 .git/info/exclude
+  [ -f "$STATE_KV" ] || { warn "账本不存在（先 rdsh state --init）"; return 1; }
+  local arg="${1:-}" k n=0 d
+  if [ -n "$arg" ] && [ "$arg" != "--all" ]; then
+    k="$(state_key_for_arg "$arg")" || die "账本里没有对象匹配“$arg”（rdsh state list 看全部）"
+    d="$(state_kv_get "$k" dir)"
+    [ -n "$d" ] && { state_echo_installed "$d"; state_git_exclude "$d"; }
+    log "已刷新回声：$k"
+    return 0
+  fi
+  local total; total="$(state_keys | grep -c . || true)"
+  state_journal sync - "刷新 $total 个检出的回声"
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    d="$(state_kv_get "$k" dir)"
+    [ -n "$d" ] || continue
+    state_echo_installed "$d" && n=$((n+1))
+    state_git_exclude "$d"
+  done < <(state_keys)
+  log "已刷新 $n 个检出的 .installed 回声"
+}
+
 state_record_migration() {  # <源> <目标> [--backup DIR] [--sessions S] [--probe 结论] [--dry-run]
   # 给 migrate.sh 用的窄接口：只追加一条迁移事件 + 两个字段，不碰角色（角色是人或"在跑的实例"定的）
   local src="" dst="" backup="" sessions="" probe="" dry=0 a
@@ -2145,6 +2173,7 @@ cmd_state() {
       state_set_role "$key" "$role" '人工指定'
       ;;
     render) state_render_baseline ;;
+    sync) state_sync "$@" ;;
     record-migration|migration) state_record_migration "$@" ;;
     journal|log) state_journal_tail "$@" ;;
     init|--init) state_init "$@" ;;
@@ -2328,7 +2357,7 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help ) : ;;
+    base|fetch|help|-h|--help|doctor ) : ;;
     state ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
@@ -2347,6 +2376,7 @@ main() {
     base|root ) shift; cmd_base "$@" ;;
     state ) shift; cmd_state "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
+    doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     fetch|download|dl ) shift; cmd_fetch "$@" ;;
     help|-h|--help ) cmd_help ;;
     --dry-run|-n ) cmd_start "$@" ;;
