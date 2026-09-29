@@ -2,6 +2,35 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.4.0 — 2026-09-29
+
+### 新增
+
+- **`rdsh state` —— 状态账本（唯一权威）**。回答"谁是什么角色"，并消掉此前三份手写状态必然漂移的债：
+  - **权威** `$BASE/.dsh-suite/state/versions.kv`（原子替换 `tmp`+`mv`，600；目录 700）；**流水** `state/journal.log`（**只追加**，`时间｜事件｜对象｜细节`）；**回声** 各检出里的 `.installed`（仍是"已构建"判据，但内容升级为 KEY=VALUE）；**视图** `$BACKUP_ROOT/回退基线.md`（**生成物**，不再手写）。
+  - 角色：`installed` / `current` / `baseline` / `retire-candidate` / `retired`。`rdsh list` 新增角色列。
+  - `rdsh state --init`：从现有检出（`.installed` 的 mtime、git remote、HEAD 短 commit）与旧 `回退基线.md` **反向推断**并**逐条打印依据**；旧手写文件 `mv` 进 `state/回退基线-历史.md` 留档（原文不改，打印还原命令）。`--dry-run` 连目录都不建。
+  - `rdsh state show/role/render/journal [--init]`，以及给 `migrate.sh` 用的窄接口 `state record-migration`（只追加事件 + 两个字段，**不动角色**——角色由人或"在跑的实例"决定）。
+  - 角色推断只认**有依据**的：在跑实例（`ss`+`/proc` 的检出目录 → 账本对象）判 `current`，旧基线 md 的最后一条回退动作判 `baseline`；其余留 `installed`。多个实例同时在跑时**不猜**。
+- **`tools/smoke-state.sh` + CI 功能冒烟**：在临时 BASE（复制 `Rdsh.sh` 进去 + `RDSH_CONFIG` 指向临时文件）里跑 47 项断言，并在跑测试前后对**真机** state 资产做逐字节快照比对。
+
+### 变更
+
+- **`migrate.sh` 第 7 步不再手工追加 `回退基线.md`**（该文件已是生成物），改为调 `rdsh state record-migration` 记账再重生成视图；`Rdsh.sh` 不在或账本未播种时**只告警不致命**（迁移不该因为记账失败而失败）。
+- 新增派生变量 `STATE_ROOT`（默认可覆盖，见 README 配置表）；`rdsh base` 的输出多一行状态账本。
+- `.installed` 会被写进检出的 `.git/info/exclude`（本地、不进上游），避免污染 `git status`。
+
+### 修复
+
+- `rdsh install` / 自动安装完成后写的是**结构化回声**（含 role/commit/source），不再是空文件 `touch`；检出已就绪但账本缺记录时**自愈补登记**（只写事实，不改角色）。
+- `state role` 对不存在的对象名会**报错**而不是凭空新建一行幽灵记录；非法角色被拒绝。
+
+### 设计约束（写进代码，不是写在文档里）
+
+- **状态只追加**：`journal.log` 永不改写；删除留墓碑。
+- **不替用户定角色**：推断只写有依据的两项，且都打印依据；`state_set_role` 不创建对象。
+- **两个 `set -euo pipefail` 陷阱**（本轮实测踩到）：`${#ARR[@]:-0}` 是非法替换；`while read` 读到 EOF 的非零状态在管道 + `pipefail` 下会被当成失败——后者曾让 `state --init` 静默退出。
+
 ## 0.3.0 — 2026-09-26
 
 ### 新增

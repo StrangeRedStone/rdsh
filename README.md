@@ -34,6 +34,7 @@
 | `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token；按端口分家） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
+| `rdsh state [list\|show\|role\|render\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
 
 > `start` 与 `run` 等价（兼容别名）。多实例归属靠"**端口 + DSH_HOME**"两个维度：
@@ -60,9 +61,13 @@ $BASE/
 ├── dsh/                  # 本仓库 + 各版本检出（<检出目录>/ 自动扫描）
 ├── .dsh/<版本号>/        # 每版本独立数据根（DSH_HOME）
 ├── .dsh-shared/          # 与版本无关的作者资产（软链进各 home）
-├── .dsh-backup/          # 备份 + 回退基线.md
+├── .dsh-backup/          # 备份 + 回退基线.md（生成物，勿手改）
 ├── .dsh-logs/            # 启动日志（700/600，含访问 token）
-└── dsh-plugins/          # 插件的唯一权威副本
+├── dsh-plugins/          # 插件的唯一权威副本
+└── .dsh-suite/           # 运行期状态（新件都在这一层，可用配置逐项改位置）
+    ├── state/            #   状态账本：versions.kv + journal.log（唯一权威，700）
+    ├── run/              #   实例注册表（注解层；真相是 ss + /proc）
+    └── debug/            #   调试沙箱（rdsh debug）
 ```
 
 ## 依赖
@@ -109,7 +114,32 @@ rdsh start
 | `RDSH_PLUGIN_ROOT` | `$BASE/dsh-plugins` | 插件权威副本 |
 | `DSH_LOG_DIR` | `$BASE/.dsh-logs` | 启动日志目录 |
 | `RDSH_TRASH` | `/tmp` | 「删除」的回收目录（永不 `rm`） |
+| `RDSH_STATE_ROOT` | `$BASE/.dsh-suite/state` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
+| `RDSH_RUN_DIR` | `$BASE/.dsh-suite/run` | 实例注册表（注解层，真相是 `ss` + `/proc`） |
+| `RDSH_DEBUG_ROOT` | `$BASE/.dsh-suite/debug` | 调试沙箱（`rdsh debug`） |
 | `RDSH_CONFIG` | `~/.config/rdsh/config` | 配置文件路径 |
+
+## 状态账本（state，0.4.0 起）
+
+回答一个问题：**谁是什么角色**。此前这件事有三份手写来源（各检出里的 `.installed`、实例注册表、`回退基线.md`），必然漂移；现在收成一处：
+
+| 角色 | 出处 | 用途 |
+|---|---|---|
+| **权威** | `$STATE_ROOT/versions.kv` | rdsh 唯一可写的状态源（原子替换，700） |
+| **流水** | `$STATE_ROOT/journal.log` | **只追加**的事件历史（`时间｜事件｜对象｜细节`） |
+| **回声** | `<检出>/.installed` | KEY=VALUE；文件**存在**仍表示"已构建" |
+| **视图** | `$BACKUP_ROOT/回退基线.md` | 人读；由上面三者**生成**，不再手写 |
+
+角色取值：`installed`（已安装未定）/ `current`（当前在用）/ `baseline`（回退基线）/ `retire-candidate`（可删）/ `retired`（已退役）。
+
+老机器首次用：`rdsh state --init`。它会从现有检出（`.installed` 的 mtime、git remote、HEAD）和旧 `回退基线.md` **反向推断**，**逐条打印它推断了什么**，并把旧的手写文件移进 `$STATE_ROOT/回退基线-历史.md` 留档（`mv`，原文不改，还原命令会打印）。
+
+> `.installed` 写在检出里，所以 `rdsh` 会把它加进 `.git/info/exclude`（本地生效、不进上游）——否则它会污染 `git status`，动摇补丁工具的"干净树"前提。
+
+## 平台与目标
+
+- **目标平台**：Linux + `bash` 4+ + POSIX `coreutils` + `systemd --user` + `git`。核心机制**结构性**依赖它们：`ss` + `/proc` 真相层、`systemd-run` 逃逸舱、POSIX 软链、同文件系统 `mv` 的原子语义。
+- **非目标**：Windows（移植等于重写，且会丢掉全部"实机实测"的证据基础）；Rust/Go 重写（当前 ROI 低）。但内核在设计上向声明式靠拢——状态文件即期望状态，命令即 reconcile——将来真要换实现形态，内核不用动。
 
 ## 安全设计（原则 P1）
 
@@ -122,6 +152,8 @@ rdsh start
 ## 已知限制（诚实边界）
 
 - **检出放在 `MANAGE_ROOT` 下**（默认 `$BASE/dsh`）。未显式配置、且 `$BASE/dsh` 不是本工具所在处时，`MANAGE_ROOT` 会回退到**脚本自身目录**——所以 `git clone` 到任意目录后可直接运行，检出也会落在那里（已被 `.gitignore` 忽略）。要换位置用 `rdsh base <路径>` 或设 `RDSH_MANAGE_ROOT`。
+- **写功能冒烟要连配置一起隔离**：`RDSH_CONFIG` 若被环境注入、或 `$BASE/dsh` 里没有 `Rdsh.sh`（触发自定位回退），"只换 HOME"的隔离测试仍会打到真机。`tools/smoke-state.sh` 演示了正确做法。
+- **状态账本首次使用要播种**：0.4.0 之前装的机器没有账本，`rdsh state list` 会提示 `--init`；未播种时 `rdsh list` 的角色列显示 `-`（不报错）。
 - `plugin-sync` 的方向判断基于 **mtime**，是近似值（`cp -a` 会保留时间、手改会刷新）；更稳的「构建记录」尚未实现。
 - 插件权威副本「谁最新」目前由人（或 `--adopt`）决定，**没有自动构建流水线**。
 - `rdsh fetch` 依赖 GitHub；网络不畅时可能失败（`--list` 有 10 分钟磁盘缓存与 `git ls-remote` 回退）。

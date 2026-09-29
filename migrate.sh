@@ -27,8 +27,9 @@
 #   DSH_BACKUP_ROOT $BASE/.dsh-backup   DSH_SHARED_HOME $BASE/.dsh-shared
 #   （$BASE 默认 ~/Mapp；以上均可用环境变量或配置文件覆盖）
 #
-# 回退基线: 每次运行都会把「源/目标/备份目录/还原命令/探针结论」追加进
-#           $DSH_BACKUP_ROOT/回退基线.md（只追加，不覆盖）。
+# 回退基线: 每次运行都把「源/目标/备份目录/会话策略/探针结论」记进**状态账本**
+#           （$BASE/.dsh-suite/state/，唯一权威），再重生成 $DSH_BACKUP_ROOT/回退基线.md。
+#           2026-09-29 起该 md 是**生成物**，不再手工追加 —— 手写历史留在 state/回退基线-历史.md。
 # =============================================================================
 set -euo pipefail
 
@@ -365,26 +366,30 @@ else
 fi
 [ "$DRY" = "0" ] && printf '  提示：CLI 在 DSH 进程外运行（无真 ctx）→ C 维「服务运行时注册」不具结论性；启动目标版本后可在会话里用 compat_check 复跑（那里有真 ctx）\n'
 
-# ---- 7. 回退基线 ----
-step "7/7 回退基线（$BASELINE，只追加）"
-BASELINE_BLOCK=$(cat <<EOF
-
-## $TS ｜ $SRC_VER → $DST_VER
-- 源 home：\`$SRC_HOME\`
-- 目标 home：\`$DST_HOME\`
-- 会话策略：$CARRY_SESSIONS
-- 备份目录：$( [ "$DO_BACKUP" = "1" ] && printf '`%s`' "$BACKUP_DIR" || printf '**本次无备份（--no-backup）**' )
-- 探针结论：$(printf '%s\n' "$PROBE_OUT" | grep -m1 '^## 结论' || echo '（未跑或未取到）')
-- 回退动作：停掉目标版本实例 → \`rdsh start $SRC_VER\`（源 home 全程只读，未被修改）
-$( [ "$DO_BACKUP" = "1" ] && printf -- '- 还原命令：见 `%s/README-还原.md`\n' "$BACKUP_DIR" )
-EOF
-)
+# ---- 7. 回退基线（状态账本） ----
+# 2026-09-29 起：$BASELINE 是**生成物**（由 state 账本 + 流水渲染），所以这里不再手工追加，
+# 而是通过窄接口把事实记进账本，再让它重新生成。Rdsh.sh 不在/账本没播种时只告警不致命 ——
+# 迁移本身不该因为一个记账动作而失败（原则 P1）。
+step "7/7 回退基线（记入状态账本 → 生成 $BASELINE）"
+REC_BACKUP=""
+[ "$DO_BACKUP" = "1" ] && REC_BACKUP="$BACKUP_DIR"
+REC_PROBE="$(printf '%s\n' "$PROBE_OUT" | grep -m1 '^## 结论' || true)"
 if [ "$DRY" = "1" ]; then
-  printf '  [dry-run] 将追加以下内容：\n%s\n' "$BASELINE_BLOCK" | sed 's/^/  /'
+  printf '  [dry-run] 将记录一条迁移事件并重新生成 %s：\n' "$BASELINE"
+  printf '    源=%s 目标=%s 会话策略=%s\n' "$SRC_VER" "$DST_VER" "$CARRY_SESSIONS"
+  printf '    备份=%s\n    探针=%s\n' "${REC_BACKUP:-（本次无备份）}" "${REC_PROBE:-（未跑或未取到）}"
+elif [ -f "$MANAGE_ROOT/Rdsh.sh" ]; then
+  if bash "$MANAGE_ROOT/Rdsh.sh" state record-migration "$SRC_VER" "$DST_VER" \
+       --backup "$REC_BACKUP" --sessions "$CARRY_SESSIONS" --probe "$REC_PROBE" 2>&1 | sed 's/^/  /'; then
+    :
+  else
+    warn '状态账本记录失败（账本未播种？跑一次 `rdsh state --init`）—— 迁移本身不受影响'
+  fi
 else
-  [ -f "$BASELINE" ] || printf '# 回退基线（migrate.sh 自动追加；原则 P1：只写不拦）\n' > "$BASELINE"
-  printf '%s\n' "$BASELINE_BLOCK" >> "$BASELINE"
-  printf '  已追加一节（共 %s 节）\n' "$(grep -c '^## ' "$BASELINE")"
+  warn "找不到 $MANAGE_ROOT/Rdsh.sh，跳过账本记录（回退信息见下方提示）"
+fi
+if [ "$DRY" = "0" ] && [ -f "$BASELINE" ]; then
+  printf '  视图已更新：%s（共 %s 个对象）\n' "$BASELINE" "$(grep -c '^| [^|]' "$BASELINE" 2>/dev/null || echo 0)"
 fi
 
 step "完成"

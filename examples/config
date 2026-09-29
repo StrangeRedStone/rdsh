@@ -14,9 +14,12 @@ BASE=~/Mapp
 # ── 逐项覆盖（按需取消注释） ───────────────────────────────
 # MANAGE_ROOT=~/Mapp/dsh          # 检出根（本仓库应在这，与检出同目录）
 # DATA_ROOT=~/Mapp/.dsh           # 每版本数据根
-# BACKUP_ROOT=~/Mapp/.dsh-backup  # 备份与回退基线
+# BACKUP_ROOT=~/Mapp/.dsh-backup  # 备份与回退基线（回退基线.md 是生成物）
 # SHARED_ROOT=~/Mapp/.dsh-shared  # 与版本无关的作者资产（软链共享）
 # LOG_DIR=~/Mapp/.dsh-logs        # 启动日志（含访问 token，注意权限）
+# STATE_ROOT=~/Mapp/.dsh-suite/state  # 状态账本（唯一权威）：versions.kv + journal.log
+# RUN_DIR=~/Mapp/.dsh-suite/run       # 实例注册表（注解层，真相是 ss + /proc）
+# DEBUG_ROOT=~/Mapp/.dsh-suite/debug  # 调试沙箱（rdsh debug）
 
 # ── 其它 ───────────────────────────────────────────────────
 # RDSH_TRASH=/tmp                 # 「删除」的回收目录，永不 rm

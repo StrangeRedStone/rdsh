@@ -42,6 +42,11 @@ jobs:
           }
           echo "ok  可移植性回退生效"
 
+      - name: 功能冒烟（隔离 BASE：state 状态账本）
+        run: |
+          set -e
+          bash tools/smoke-state.sh ./Rdsh.sh
+
   shellcheck:
     name: shellcheck（error 级阻塞，warning 级咨询）
     runs-on: ubuntu-latest

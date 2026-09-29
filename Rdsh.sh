@@ -65,6 +65,20 @@
 #                                         #   后续 rdsh patch export / 上游 diff 可用；--tarball 改走归档：更小更稳但无 .git）
 #   rdsh help
 #
+# 状态账本（state，B1 起）—— 回答"谁是什么角色"，是 rdsh 唯一的权威状态源：
+#   rdsh state [list]                     # 列出账本（对象键/角色/安装时间/来源/检出/数据）
+#   rdsh state show <目标>                # 看某个对象的全部字段
+#   rdsh state role <目标> <角色>         # 改角色：current|baseline|retire-candidate|retired
+#   rdsh state render                     # 重新生成 $BACKUP_ROOT/回退基线.md（人读视图）
+#   rdsh state journal [-n N]             # 看事件流水（只追加，永不改写历史）
+#   rdsh state --init [--dry-run]         # 首次播种：从现有检出 + 旧 回退基线.md 反向推断，
+#                                         #   逐条打印它推断了什么；旧手写历史移入
+#                                         #   $STATE_ROOT/回退基线-历史.md 留档（不删）
+#   rdsh state record-migration <源> <目标> [--backup DIR] [--sessions S] [--probe 结论]
+#                                         # migrate.sh 专用的窄接口：只追加迁移事件 + 两个字段
+#   账本落点：$BASE/.dsh-suite/state/{versions.kv,journal.log}（700）
+#   回声：各检出里的 .installed（KEY=VALUE；存在仍表示"已构建"，并已加进 .git/info/exclude）
+#
 # 选择目标：序号 | 版本号片段(rc.2) | 项目名片段(harness) | 检出目录名 | 完整路径。
 # 输入只认可打印字符，控制键/转义序列会被剔除，不会干扰匹配。
 #
@@ -80,7 +94,7 @@ set -euo pipefail
 # 优先级：环境变量 > 配置文件 > 默认。
 # 配置文件（默认 ~/.config/rdsh/config，可用 RDSH_CONFIG 指定）——纯 KEY=VALUE，**不 source**：
 #     BASE=$HOME/Mapp                # 唯一旋钮：$BASE/dsh 放检出、$BASE/.dsh 放数据
-#     # 需要时可逐项覆盖：MANAGE_ROOT= / DATA_ROOT= / BACKUP_ROOT= / SHARED_ROOT= / LOG_DIR=
+#     # 需要时可逐项覆盖：MANAGE_ROOT= / DATA_ROOT= / BACKUP_ROOT= / SHARED_ROOT= / LOG_DIR= / STATE_ROOT=
 # 例：BASE=$HOME → 检出在 ~/dsh、数据在 ~/.dsh、备份在 ~/.dsh-backup
 RDSH_CONFIG="${RDSH_CONFIG:-$HOME/.config/rdsh/config}"
 cfg_get() {  # <KEY> → 配置文件里的值（去引号、展开 ~）；没有则空
@@ -103,6 +117,7 @@ _shared="$(expand "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"
 _logdir="$(expand "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")"
 _run="$(expand "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")"
 _dbg="$(expand "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"
+_state="$(expand "${RDSH_STATE_ROOT:-$(cfg_get STATE_ROOT)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/dsh}"
 # 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
@@ -126,6 +141,13 @@ STOP_DELAY="${DSH_STOP_DELAY:-3}"         # 自杀式停止时留给调用方落
 LAUNCH_TIMEOUT="${DSH_LAUNCH_TIMEOUT:-90}" # 后台启动后等端口就绪的上限秒数
 NO_OPEN="${DSH_NO_OPEN:-0}"               # 1=不给 dsh 传 --no-open 的反面：1 表示传 --no-open（不开浏览器）
 DEBUG_ROOT="${_dbg:-$BASE/.dsh-suite/debug}" # 调试环境根：<id>.env 清单 + <id>/ 就是干净 DSH_HOME
+# 状态账本（唯一权威）：回答"谁是什么角色"。此前三份手写状态（检出里的 .installed、
+# 实例注册表、$BACKUP_ROOT/回退基线.md）会漂移；现在收成一处，其余是它的回声/视图。
+STATE_ROOT="${_state:-$BASE/.dsh-suite/state}"
+STATE_KV="$STATE_ROOT/versions.kv"        # 当前真值（本工具唯一可写状态源）
+STATE_JOURNAL="$STATE_ROOT/journal.log"   # 只追加的事件流水（审计）
+STATE_HISTORY="$STATE_ROOT/回退基线-历史.md" # 迁移期手写历史的留档（首次 --init 时移入）
+BASELINE_MD="$BACKUP_ROOT/回退基线.md"     # 人读视图：由上面三者生成，不再手写
 # 调用期覆盖（由 --debug <id> 设置）：让 launch_* 用调试环境的 home / 登记 kind=debug
 ENTRY_HOME_OVERRIDE=""
 INSTANCE_KIND="real"
@@ -213,7 +235,11 @@ collect_entries() {
     [ -n "$v" ] && data="$v" || data=$(printf '%s/%s' "$DATA_ROOT" "$ver")
     ENTRIES+=("$ver|${path%/}|$(basename "$path")|$data")
   done
-  [ "${#ENTRIES[@]}" -gt 0 ] || die "未找到任何 dsh 检出（$MANAGE_ROOT 下无版本目录，也无 .map 外部登记）"
+  if [ "${#ENTRIES[@]}" -eq 0 ]; then
+    # state/du 这类子命令在"还没有任何检出"时也要能跑（只看账本/只看衍生物）
+    [ "${ALLOW_NO_ENTRIES:-0}" = "1" ] && return 0
+    die "未找到任何 dsh 检出（$MANAGE_ROOT 下无版本目录，也无 .map 外部登记）"
+  fi
 }
 
 sort_entries() {  # 按版本语义倒序，最新在前（序号 1 = 默认）
@@ -231,6 +257,11 @@ entry_field() {  # <entry> <1..4> = version|dir|base|data
   case "$n" in 1) printf '%s' "$f1";; 2) printf '%s' "$f2";; 3) printf '%s' "$f3";; 4) printf '%s' "$f4";; esac
 }
 
+entry_key() {  # <entry> → state 账本里的对象键。B1 用版本号；B7 起同版本多份会带 -2 次号
+  local ver; ver=$(entry_field "$1" 1)
+  printf '%s' "$ver"
+}
+
 built_status() {
   local dir="$1"
   if [ -d "$dir/node_modules" ] && [ -f "$dir/.installed" ]; then echo '就绪'
@@ -244,14 +275,16 @@ data_state() {
 }
 
 list_entries() {
-  local i=1 e ver dir base data
+  local i=1 e ver dir base data key role
   printf '\n可用 dsh 版本：\n'
   for e in "${ENTRIES[@]}"; do
     ver=$(entry_field "$e" 1); dir=$(entry_field "$e" 2); base=$(entry_field "$e" 3); data=$(entry_field "$e" 4)
-    printf '  [%d] %-14s %-12s  检出: %s\n' "$i" "$ver" "$(built_status "$dir")" "$base"
+    key=$(entry_key "$e"); role="$(state_role_of "$key")"
+    printf '  [%d] %-14s %-12s %-16s 检出: %s\n' "$i" "$ver" "$(built_status "$dir")" "$role" "$base"
     printf '       数据: %s (%s)\n' "$data" "$(data_state "$data")"
     i=$((i+1))
   done
+  printf '       角色来自状态账本：rdsh state（current/baseline/retire-candidate/retired/installed）\n'
 }
 
 pick_default() { printf '%s\n' "${ENTRIES[0]}"; }
@@ -587,6 +620,8 @@ ensure_built() {
   local dir="$1"
   if [ -d "$dir/node_modules" ] && [ -f "$dir/.installed" ]; then
     log '检出已就绪(node_modules + .installed)，跳过安装'
+    # 自愈：检出就绪但账本里没有它 → 补登记（只写事实，不改角色）
+    state_sync_checkout "$dir" || true
     return
   fi
   if [ "$AUTO_INSTALL" != "1" ]; then
@@ -603,8 +638,8 @@ ensure_built() {
   pnpm install || die 'pnpm install 失败'
   log 'pnpm run build ...（较慢，请耐心等待）'
   pnpm run build || die 'pnpm run build 失败'
-  touch "$dir/.installed"
-  log '安装完成(.installed)'
+  state_record_install "$dir"
+  log '安装完成(.installed + 状态账本已登记)'
 }
 
 launch_entry() {
@@ -1529,6 +1564,7 @@ cmd_base() {
   printf '  备份根     : %s\n' "$BACKUP_ROOT"
   printf '  启动日志   : %s\n' "$LOG_DIR"
   printf '  实例注册表 : %s（注解层）\n' "$RUN_DIR"
+  printf '  状态账本   : %s（唯一权威）\n' "$STATE_ROOT"
   printf '  默认端口   : %s\n' "$WEB_PORT"
   [ -n "${RDSH_BASE:-}" ] && warn "环境变量 RDSH_BASE=$RDSH_BASE 正在覆盖配置文件（改配置不会生效）"
 
@@ -1623,6 +1659,516 @@ cmd_logs() {
   else
     sed -E 's/token=[A-Za-z0-9_-]+/token=***/g' "$f" | tail -200
   fi
+}
+
+# ---------------- state：状态账本（唯一权威） ----------------
+# 定位：回答"谁是什么角色"。此前三份手写状态（检出里的 .installed、实例注册表、
+# $BACKUP_ROOT/回退基线.md）必然漂移；本模块把它们收成一处：
+#   权威 : $STATE_KV      —— 当前真值；本工具唯一可写状态源，原子替换（tmp+mv）
+#   流水 : $STATE_JOURNAL —— **只追加**；行格式 时间|事件|对象|细节
+#   回声 : <检出>/.installed —— KEY=VALUE；存在仍表示"已构建"，并已加进 .git/info/exclude
+#   视图 : $BASELINE_MD   —— 人读；由上面三者生成，不再手写
+# 原则不变（P1）：只检测、只留痕、只放行；历史只追加，删除留墓碑。
+STATE_FIELDS="key version role role_set_at installed_at source commit built_at migrated_from baseline_for dir data note"
+STATE_ROLES="installed current baseline retire-candidate retired"
+
+state_ensure() {
+  mkdir -p "$STATE_ROOT"; chmod 700 "$STATE_ROOT" 2>/dev/null || true
+  if [ ! -f "$STATE_KV" ]; then
+    ( umask 077
+      { printf '# rdsh state —— DSH 对象状态账本（唯一权威；由 rdsh 写入，手改前请先备份）\n'
+        printf '# 字段: %s\n' "$(printf '%s' "$STATE_FIELDS" | tr ' ' '|')"
+        printf '# 角色: installed(已安装未定) | current(当前在用) | baseline(回退基线) | retire-candidate(可删) | retired(已退役)\n'
+      } > "$STATE_KV" )
+  fi
+  [ -f "$STATE_JOURNAL" ] || ( umask 077; printf '# rdsh journal —— 只追加的事件流水（时间|事件|对象|细节）\n' > "$STATE_JOURNAL" )
+}
+
+state_journal() {  # <事件> <对象键> [细节...]
+  state_ensure
+  local ev="$1"; shift || true
+  local key="$1"; shift || true
+  local detail="$*"
+  detail="$(printf '%s' "$detail" | tr '\n' ' ' | tr '|' '/')"
+  ( umask 077; printf '%s|%s|%s|%s\n' "$(date -Is)" "$ev" "$key" "$detail" >> "$STATE_JOURNAL" )
+}
+
+state_col_of() {  # <字段名> → 列号
+  local i=1 f
+  for f in $STATE_FIELDS; do
+    [ "$f" = "$1" ] && { printf '%s' "$i"; return 0; }
+    i=$((i+1))
+  done
+  return 1
+}
+
+state_kv_get() {  # <对象键> <字段> → 值（无则空）
+  [ -f "$STATE_KV" ] || return 0
+  local col; col="$(state_col_of "$2")" || return 0
+  awk -F'|' -v k="$1" -v c="$col" '!/^#/ && NF>0 && $1==k { print $c; exit }' "$STATE_KV"
+}
+
+state_kv_has() {  # <对象键>
+  [ -n "$(state_kv_get "$1" key)" ]
+}
+
+state_kv_set() {  # <对象键> <字段> <值>：行不存在则新建；原子替换
+  state_ensure
+  local col; col="$(state_col_of "$2")" || die "state: 未知字段“$2”"
+  local v; v="$(printf '%s' "$3" | tr '\n' ' ' | tr '|' '/')"
+  local nf; nf="$(printf '%s' "$STATE_FIELDS" | wc -w)"
+  local tmp="$STATE_KV.tmp.$$"
+  ( umask 077
+    awk -F'|' -v OFS='|' -v k="$1" -v c="$col" -v v="$v" -v nf="$nf" '
+      /^#/ { print; next }
+      NF==0 { next }
+      { if ($1==k) { found=1; $c=v } print }
+      END {
+        if (!found) {
+          row=""
+          for (i=1;i<=nf;i++) row = row ((i==1)?"":"|") ((i==c)?v:"")
+          print row
+        }
+      }' "$STATE_KV" > "$tmp" ) && mv -f "$tmp" "$STATE_KV"
+}
+
+state_keys() {  # 所有对象键（按账本顺序）
+  [ -f "$STATE_KV" ] || return 0
+  awk -F'|' '!/^#/ && NF>0 && $1!="" { print $1 }' "$STATE_KV"
+}
+
+state_role_of() {  # <对象键> → 角色（无则 -）
+  local r; r="$(state_kv_get "$1" role)"
+  printf '%s' "${r:--}"
+}
+
+state_key_for_dir() {  # <检出目录> → 对象键（按 dir 字段找）
+  [ -f "$STATE_KV" ] || return 0
+  local col; col="$(state_col_of dir)" || return 0
+  awk -F'|' -v d="$1" -v c="$col" '!/^#/ && NF>0 && $c==d { print $1; exit }' "$STATE_KV"
+}
+
+state_current_key() {  # 账本里 role=current 的对象（无则空）
+  awk -F'|' '!/^#/ && NF>0 && $3=="current" { print $1; exit }' "$STATE_KV" 2>/dev/null || true
+}
+
+state_commit_of() {  # <检出目录> → 短 commit（无 git 则空）
+  [ -d "$1/.git" ] && git -C "$1" rev-parse --short HEAD 2>/dev/null || true
+}
+
+state_source_of() {  # <检出目录> → 来源（远端 URL / 本地路径）
+  local dir="$1" url=""
+  if [ -d "$dir/.git" ]; then url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null || true)"; fi
+  if [ -n "$url" ]; then printf 'git:%s' "$url"; else printf 'local:%s' "$dir"; fi
+}
+
+state_data_for_dir() {  # <检出目录> → 该检出的数据目录（.map 优先，其次 DATA_ROOT/<版本>）
+  local dir="$1" e=""
+  if [ "${#ENTRIES[@]}" -gt 0 ]; then
+    e="$(entry_by_dir "$dir" 2>/dev/null || true)"
+    [ -n "$e" ] && { entry_field "$e" 4; return 0; }
+  fi
+  printf '%s/%s' "$DATA_ROOT" "$(read_version "$dir")"
+}
+
+state_git_exclude() {  # <检出目录>：把 .installed 写进 .git/info/exclude（本地，不进上游）
+  local dir="$1" xf="$1/.git/info/exclude"
+  [ -d "$dir/.git" ] || return 0
+  mkdir -p "$dir/.git/info" 2>/dev/null || return 0
+  [ -f "$xf" ] || : > "$xf"
+  grep -qxF '.installed' "$xf" 2>/dev/null || printf '.installed\n' >> "$xf"
+}
+
+state_echo_installed() {  # <检出目录>：把账本回写成 .installed（KEY=VALUE）
+  local dir="$1" key; [ -n "$dir" ] || return 0
+  key="$(state_key_for_dir "$dir")"
+  [ -n "$key" ] || return 0
+  local n; n="$(grep -c '' "$STATE_JOURNAL" 2>/dev/null || echo 0)"
+  ( umask 022
+    { printf '# rdsh —— 检出状态回声；权威是 %s（可由 rdsh state render 重建）\n' "$STATE_KV"
+      printf 'key=%s\n'            "$key"
+      printf 'version=%s\n'        "$(state_kv_get "$key" version)"
+      printf 'role=%s\n'           "$(state_kv_get "$key" role)"
+      printf 'installed_at=%s\n'   "$(state_kv_get "$key" installed_at)"
+      printf 'source=%s\n'         "$(state_kv_get "$key" source)"
+      printf 'commit=%s\n'         "$(state_kv_get "$key" commit)"
+      printf 'built_at=%s\n'       "$(state_kv_get "$key" built_at)"
+      printf 'migrated_from=%s\n'  "$(state_kv_get "$key" migrated_from)"
+      printf 'baseline_for=%s\n'   "$(state_kv_get "$key" baseline_for)"
+      printf 'state_journal_lines=%s\n' "$n"
+    } > "$dir/.installed" )
+}
+
+state_set_role() {  # <对象键> <角色> [依据]
+  local key="$1" role="$2" why="${3:-}"
+  case " $STATE_ROLES " in *" $role "*) ;; *) die "state: 角色只能是 $STATE_ROLES（收到：$role）" ;; esac
+  # 不凭空造对象：打错名字必须报错，而不是静默新建一行幽灵记录
+  state_kv_has "$key" || die "state: 账本里没有对象“$key”（rdsh state list 看全部；先 rdsh state --init 播种）"
+  state_kv_set "$key" role "$role"
+  state_kv_set "$key" role_set_at "$(date -Is)"
+  state_journal role "$key" "$role${why:+（$why）}"
+  local d; d="$(state_kv_get "$key" dir)"
+  [ -n "$d" ] && state_echo_installed "$d" 2>/dev/null || true
+  log "角色已改：$key → $role"
+}
+
+state_record_install() {  # <检出目录> [角色]：安装完成时登记（幂等）
+  local dir ver key role other inst built src
+  dir="$(readlink -f "$1")"
+  ver="$(read_version "$dir")"
+  key="$(state_key_for_dir "$dir")"; [ -n "$key" ] || key="$ver"
+  other="$(state_kv_get "$key" dir)"
+  if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+    warn "同版本第二份检出：账本键 $key 已指向 $other → 本次不覆盖（同版本共存的 -2 次号是 B7 的事）"
+    return 1
+  fi
+  role="${2:-}"
+  if [ -z "$role" ]; then
+    role="$(state_kv_get "$key" role)"
+    if [ -z "$role" ]; then
+      if [ -z "$(state_current_key)" ]; then role=current; else role=installed; fi
+    fi
+  fi
+  inst="$(state_kv_get "$key" installed_at)"
+  if [ -z "$inst" ]; then
+    # 首次登记：有 .installed 就用它的 mtime（事实），否则记当下
+    inst="$( ( [ -f "$dir/.installed" ] && date -Is -r "$dir/.installed" ) 2>/dev/null || date -Is )"
+  fi
+  built="$( ( [ -f "$dir/.installed" ] && date -Is -r "$dir/.installed" ) 2>/dev/null || date -Is )"
+  src="$(state_source_of "$dir")"
+  state_kv_set "$key" key "$key"
+  state_kv_set "$key" version "$ver"
+  state_kv_set "$key" role "$role"
+  state_kv_set "$key" installed_at "$inst"
+  state_kv_set "$key" built_at "$built"
+  state_kv_set "$key" source "$src"
+  state_kv_set "$key" commit "$(state_commit_of "$dir")"
+  state_kv_set "$key" dir "$dir"
+  state_kv_set "$key" data "$(state_data_for_dir "$dir")"
+  state_git_exclude "$dir"
+  state_echo_installed "$dir"
+  state_journal install "$key" "dir=$dir role=$role source=$src"
+  log "已登记状态：$key（role=$role）"
+}
+
+state_sync_checkout() {  # <检出目录>：账本缺该目录时补登记（只写事实）
+  local dir; dir="$(readlink -f "$1")"
+  [ -n "$(state_key_for_dir "$dir")" ] && return 0
+  state_record_install "$dir" || true
+}
+
+state_running_versions() {  # 正在跑的实例对应的版本（去重；只用于展示）
+  local p _pid ver _dir _data _kind _id _unit _st
+  while IFS='|' read -r p _pid ver _dir _data _kind _id _unit _st; do
+    [ -n "$p" ] || continue
+    [ -n "$ver" ] || continue
+    printf '%s\n' "$ver"
+  done <<< "$(instances_live)" | sort -u || true
+  return 0
+}
+
+state_running_keys() {  # 正在跑的实例 → 账本对象键（宿主状态不会污染隔离环境）
+  # 匹配顺序：账本 dir 字段 → 已管理条目（首次播种时账本还是空的，得靠后者）
+  # 注意：`while read` 读到 EOF 会返回非零，管道 + pipefail 会把它当失败 → 必须兜底
+  local p _pid ver dir _data _kind _id _unit _st k e
+  while IFS='|' read -r p _pid ver dir _data _kind _id _unit _st; do
+    [ -n "$p" ] || continue
+    k="$(state_key_for_dir "$dir" 2>/dev/null || true)"
+    if [ -z "$k" ] && [ "${#ENTRIES[@]}" -gt 0 ]; then
+      e="$(entry_by_dir "$dir" 2>/dev/null || true)"
+      [ -n "$e" ] && k="$(entry_key "$e")"
+    fi
+    [ -n "$k" ] && printf '%s\n' "$k"
+  done <<< "$(instances_live)" | sort -u || true
+  return 0
+}
+
+state_baseline_hint_from_md() {  # <旧回退基线.md> → 推"最后一条回退动作的目标版本"
+  local f="$1" v=""
+  [ -f "$f" ] || return 0
+  v="$(grep -oE 'rdsh (start|run) [^ `)]+' "$f" 2>/dev/null | tail -1 | awk '{print $3}')"
+  [ -n "$v" ] || v="$(grep -oE '源 home：[[:space:]]*[^ ]+' "$f" 2>/dev/null | tail -1 | sed -E 's|.*/||')"
+  printf '%s' "$v"
+}
+
+state_record_migration() {  # <源> <目标> [--backup DIR] [--sessions S] [--probe 结论] [--dry-run]
+  # 给 migrate.sh 用的窄接口：只追加一条迁移事件 + 两个字段，不碰角色（角色是人或"在跑的实例"定的）
+  local src="" dst="" backup="" sessions="" probe="" dry=0 a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --backup)     shift; backup="${1:-}" ;;
+      --backup=*)   backup="${a#--backup=}" ;;
+      --sessions)   shift; sessions="${1:-}" ;;
+      --sessions=*) sessions="${a#--sessions=}" ;;
+      --probe)      shift; probe="${1:-}" ;;
+      --probe=*)    probe="${a#--probe=}" ;;
+      --dry-run|-n) dry=1 ;;
+      -*) die "未知选项：$a（state record-migration <源> <目标> [--backup DIR] [--sessions S] [--probe 结论] [--dry-run]）" ;;
+      *) if [ -z "$src" ]; then src="$a"; elif [ -z "$dst" ]; then dst="$a"; else die "多余参数：$a"; fi ;;
+    esac
+    shift || true
+  done
+  [ -n "$src" ] && [ -n "$dst" ] || die '用法: rdsh state record-migration <源> <目标> [--backup DIR] [--sessions S] [--probe 结论] [--dry-run]'
+  local s d
+  s="$(state_key_for_arg "$src" 2>/dev/null || true)"
+  d="$(state_key_for_arg "$dst" 2>/dev/null || true)"
+  if [ -z "$s" ] || [ -z "$d" ]; then
+    warn "账本里找不到：$([ -z "$s" ] && printf '源=%s ' "$src")$([ -z "$d" ] && printf '目标=%s' "$dst")"
+    warn '先播种账本：rdsh state --init'
+    return 1
+  fi
+  if [ "$dry" = "1" ]; then
+    printf '  [dry-run] 将记录迁移事件：%s → %s（backup=%s sessions=%s probe=%s）\n' \
+      "$s" "$d" "${backup:-无}" "${sessions:-未记}" "${probe:-未取到}"
+    return 0
+  fi
+  state_kv_set "$d" migrated_from "$s"
+  state_kv_set "$s" baseline_for "$d"
+  state_journal migrate "$d" "from=$s backup=${backup:-无} sessions=${sessions:-未记} probe=${probe:-未取到}"
+  state_echo_installed "$(state_kv_get "$d" dir)" 2>/dev/null || true
+  state_echo_installed "$(state_kv_get "$s" dir)" 2>/dev/null || true
+  state_render_baseline || true
+  log "已记录迁移：$s → $d"
+  log "回退动作：停掉 $d 的实例 → rdsh start $s（源 home 全程只读）"
+}
+
+state_render_baseline() {  # 生成人读视图 $BASELINE_MD（拒绝覆盖手写文件）
+  state_ensure
+  if [ -f "$BASELINE_MD" ] && ! head -1 "$BASELINE_MD" | grep -q 'rdsh-generated'; then
+    warn "$BASELINE_MD 没有 rdsh 生成标记（像是手写文件）→ 不覆盖。先跑：rdsh state --init"
+    return 1
+  fi
+  mkdir -p "$(dirname "$BASELINE_MD")"
+  local tmp="$BASELINE_MD.tmp.$$" k
+  ( umask 077
+    { printf '<!-- rdsh-generated —— 本文件由 rdsh 生成，勿手改；权威：%s -->\n' "$STATE_KV"
+      printf '# 回退基线（生成于 %s）\n\n' "$(date -Is)"
+      printf '> 回答两个问题：**万一要退，退到哪个版本？怎么退？** 角色定义见 `rdsh state`。\n\n'
+      printf '## 当前对象与角色\n\n'
+      printf '| 对象 | 版本 | 角色 | 安装时间 | 来源 | commit | 检出 |\n|---|---|---|---|---|---|---|\n'
+      while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        printf '| %s | %s | %s | %s | %s | %s | `%s` |\n' \
+          "$k" "$(state_kv_get "$k" version)" "$(state_kv_get "$k" role)" \
+          "$(state_kv_get "$k" installed_at)" "$(state_kv_get "$k" source)" \
+          "$(state_kv_get "$k" commit)" "$(state_kv_get "$k" dir)"
+      done < <(state_keys)
+      printf '\n## 事件流水（最近 40 条；全文见 `%s`）\n\n```\n' "$STATE_JOURNAL"
+      grep -v '^#' "$STATE_JOURNAL" 2>/dev/null | tail -40 || true
+      printf '```\n'
+      if [ -f "$STATE_HISTORY" ]; then
+        printf '\n---\n\n## 迁移期历史（2026-09-29 之前手写，原文留档）\n\n'
+        cat "$STATE_HISTORY"
+      fi
+    } > "$tmp"
+  ) && mv -f "$tmp" "$BASELINE_MD"
+  log "已生成 $BASELINE_MD"
+}
+
+state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，逐条打印依据
+  local dry=0 a
+  for a in "$@"; do case "$a" in --dry-run|-n) dry=1 ;; *) die "未知选项：$a（state --init [--dry-run]）" ;; esac; done
+  [ "$dry" = "1" ] || state_ensure     # --dry-run 不落任何盘（连目录都不建）
+  echo "账本：$STATE_KV"
+  echo "流水：$STATE_JOURNAL"
+  echo
+  local e dir ver key registered=0 inferred=0 dup=0
+  for e in "${ENTRIES[@]:-}"; do
+    [ -n "$e" ] || continue
+    dir="$(readlink -f "$(entry_field "$e" 2)")"
+    ver="$(entry_field "$e" 1)"
+    key="$(entry_key "$e")"
+    if state_kv_has "$key"; then
+      printf '  已登记  %-18s %s\n' "$key" "$dir"; registered=$((registered+1)); continue
+    fi
+    local other; other="$(state_kv_get "$key" dir)"
+    if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+      warn "同版本第二份检出：键 $key 已指向 $other → 跳过 $dir（-2 次号是 B7 的事）"
+      dup=$((dup+1)); continue
+    fi
+    local inst built src com
+    if [ -f "$dir/.installed" ]; then
+      inst="$(date -Is -r "$dir/.installed" 2>/dev/null || date -Is)"
+      built="$inst"
+      printf '  推断    %-18s 安装=%s（依据：.installed 的 mtime）\n' "$key" "$inst"
+    else
+      inst="$(date -Is -r "$dir" 2>/dev/null || date -Is)"
+      built=""
+      printf '  推断    %-18s 安装=%s（依据：检出目录 mtime；无 .installed）\n' "$key" "$inst"
+    fi
+    src="$(state_source_of "$dir")"; com="$(state_commit_of "$dir")"
+    printf '          %-18s 来源=%s  commit=%s\n' '' "$src" "${com:-?}"
+    inferred=$((inferred+1))
+    [ "$dry" = "1" ] && continue
+    state_kv_set "$key" key "$key"
+    state_kv_set "$key" version "$ver"
+    state_kv_set "$key" installed_at "$inst"
+    state_kv_set "$key" built_at "$built"
+    state_kv_set "$key" source "$src"
+    state_kv_set "$key" commit "$com"
+    state_kv_set "$key" dir "$dir"
+    state_kv_set "$key" data "$(state_data_for_dir "$dir")"
+    state_kv_set "$key" role installed
+    state_kv_set "$key" note '由 state --init 播种'
+    state_git_exclude "$dir"
+    state_echo_installed "$dir"
+    state_journal init "$key" "installed_at=$inst（推断）.installed mtime；source=$src"
+  done
+
+  # ---- 角色推断：只写有依据的，且逐条打印依据 ----
+  local cur base hintfile="$BASELINE_MD" ncur
+  ncur="$(state_running_keys | grep -c . || true)"
+  cur="$(state_running_keys | sed -n '1p' || true)"   # sed 读尽输入，不用 head（避免提前关管 → SIGPIPE）
+  if [ "${ncur:-0}" -gt 1 ]; then
+    warn "有多个版本在运行 → current 不自动写，请用：rdsh state role <对象> current"
+    cur=""
+  fi
+  base="$(state_baseline_hint_from_md "$hintfile")"
+  echo
+  if [ -n "$cur" ]; then
+    printf '  角色推断 %-18s → current（依据：该版本正在运行，来自 ss + /proc）\n' "$cur"
+  else
+    printf '  角色推断 %-18s → （未定：没有唯一在跑的版本）\n' '-'
+  fi
+  if [ -n "$base" ] && [ "$base" != "$cur" ]; then
+    printf '  角色推断 %-18s → baseline（依据：旧 %s 最后一条回退动作的目标）\n' "$base" "$BASELINE_MD"
+  fi
+  if [ "$dry" != "1" ]; then
+    if [ -n "$cur" ] && state_kv_has "$cur"; then
+      state_set_role "$cur" current '推断：该版本正在运行（ss+/proc）'
+    fi
+    if [ -n "$base" ] && [ "$base" != "$cur" ] && state_kv_has "$base"; then
+      state_set_role "$base" baseline '推断：旧回退基线.md 最后一条回退动作的目标'
+    fi
+  fi
+
+  # ---- 旧手写回退基线：移入历史留档（mv，不删），再生成人读视图 ----
+  echo
+  if [ -f "$BASELINE_MD" ] && ! head -1 "$BASELINE_MD" | grep -q 'rdsh-generated'; then
+    if [ "$dry" = "1" ]; then
+      printf '  [dry-run] 将把 %s 移入 %s（原文留档），随后重新生成人读视图\n' "$BASELINE_MD" "$STATE_HISTORY"
+    else
+      if [ ! -f "$STATE_HISTORY" ]; then
+        mv "$BASELINE_MD" "$STATE_HISTORY"
+        state_journal history "$BASELINE_MD" "移入 $STATE_HISTORY 留档（原文未改）"
+        log "旧手写基线已留档：$STATE_HISTORY（还原：mv \"$STATE_HISTORY\" \"$BASELINE_MD\"）"
+      else
+        warn "$STATE_HISTORY 已存在 → 本次不再移动 $BASELINE_MD（请人工合并后删）"
+      fi
+      state_render_baseline || true
+    fi
+  elif [ "$dry" != "1" ]; then
+    state_render_baseline || true
+  fi
+  echo
+  log "播种完成：已登记 $registered 个，本次推断 $inferred 个，因同版本多份跳过 $dup 个"
+  log "下一步：核对角色（rdsh state list），需要时 rdsh state role <对象> <角色>"
+}
+
+state_list() {
+  if [ ! -f "$STATE_KV" ]; then
+    warn "账本还不存在（$STATE_KV）。先跑：rdsh state --init"
+    return 0
+  fi
+  local n; n="$(state_keys | grep -c . || true)"
+  if [ "${n:-0}" = "0" ]; then
+    warn "账本还是空的。先跑：rdsh state --init"
+    return 0
+  fi
+  printf '\n状态账本（%s）—— %s 个对象：\n' "$STATE_KV" "$n"
+  printf '  %-18s %-9s %-22s %-11s %s\n' '对象' '角色' '安装时间' 'commit' '检出'
+  local k
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    printf '  %-18s %-9s %-22s %-11s %s\n' "$k" "$(state_role_of "$k")" \
+      "$(state_kv_get "$k" installed_at)" "$(state_kv_get "$k" commit)" "$(state_kv_get "$k" dir)"
+  done < <(state_keys)
+  echo
+  printf '  数据目录：\n'
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    printf '    %-18s %s\n' "$k" "$(state_kv_get "$k" data)"
+  done < <(state_keys)
+}
+
+state_key_for_arg() {  # <目标串> → 对象键（检出 → 字面键 → 版本片段唯一命中）
+  local arg="$1" e k hit="" n=0
+  if [ "${#ENTRIES[@]}" -gt 0 ]; then
+    e="$(resolve_target "$arg" 2>/dev/null || true)"
+    case "$e" in UNMANAGED:*|"") ;; *) entry_key "$e"; return 0 ;; esac
+  fi
+  if state_kv_has "$arg"; then printf '%s' "$arg"; return 0; fi
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    case "$k" in *"$arg"*) hit="$k"; n=$((n+1)) ;; esac
+  done < <(state_keys)
+  [ "$n" = "1" ] && { printf '%s' "$hit"; return 0; }
+  return 1
+}
+
+state_show() {
+  local arg="${1:-}"; [ -n "$arg" ] || die '用法: rdsh state show <目标>'
+  local key; key="$(state_key_for_arg "$arg")" || die "账本里没有对象匹配“$arg”（rdsh state list 看全部）"
+  printf '\n对象：%s\n' "$key"
+  local f
+  for f in $STATE_FIELDS; do
+    printf '  %-14s %s\n' "$f" "$(state_kv_get "$key" "$f")"
+  done
+  echo
+  printf '  事件流水（该对象）：\n'
+  grep -F "|$key|" "$STATE_JOURNAL" 2>/dev/null | sed 's/^/    /' || true
+}
+
+state_journal_tail() {
+  local n=40 a
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in -n|--lines) shift; n="${1:-40}" ;; *) die "未知选项：$a（journal [-n N]）" ;; esac
+    shift || true
+  done
+  [ -f "$STATE_JOURNAL" ] || { warn "流水还不存在（$STATE_JOURNAL）。先跑：rdsh state --init"; return 0; }
+  printf '\n事件流水（最近 %s 条；全文 %s）：\n' "$n" "$STATE_JOURNAL"
+  grep -v '^#' "$STATE_JOURNAL" | tail -"$n" | sed 's/^/  /' || true
+}
+
+cmd_state() {
+  local sub="list"
+  if [ $# -gt 0 ]; then sub="$1"; shift; fi
+  case "$sub" in
+    list|ls) state_list ;;
+    show) state_show "$@" ;;
+    role)
+      local arg="${1:-}" role="${2:-}"
+      [ -n "$arg" ] && [ -n "$role" ] || die '用法: rdsh state role <目标> <current|baseline|retire-candidate|retired|installed>'
+      local key; key="$(state_key_for_arg "$arg")" || die "账本里没有对象匹配“$arg”"
+      state_set_role "$key" "$role" '人工指定'
+      ;;
+    render) state_render_baseline ;;
+    record-migration|migration) state_record_migration "$@" ;;
+    journal|log) state_journal_tail "$@" ;;
+    init|--init) state_init "$@" ;;
+    -h|--help|help)
+      cat <<'USAGE'
+rdsh state —— 状态账本（唯一权威）
+
+用法:
+  rdsh state [list]                        列出对象（角色/安装时间/来源/commit/检出/数据）
+  rdsh state show <目标>                   看某对象全部字段 + 它的事件流水
+  rdsh state role <目标> <角色>            改角色：installed|current|baseline|retire-candidate|retired
+  rdsh state render                        重新生成 $BACKUP_ROOT/回退基线.md（人读视图）
+  rdsh state journal [-n N]                看事件流水（只追加）
+  rdsh state --init [--dry-run]            首次播种（从检出 + 旧回退基线.md 反向推断，打印依据）
+  rdsh state record-migration <源> <目标> [--backup DIR] [--sessions S] [--probe 结论]
+                                           migrate.sh 专用：追加一条迁移事件并重生成视图
+                                           （不动角色：角色由人或"在跑的实例"决定）
+
+落点（700）: $BASE/.dsh-suite/state/{versions.kv,journal.log}
+回声:        各检出里的 .installed（KEY=VALUE；已加进 .git/info/exclude）
+USAGE
+      ;;
+    *) die "用法: rdsh state [list|show <目标>|role <目标> <角色>|render|journal [-n N]|--init [--dry-run]]" ;;
+  esac
 }
 
 # ---------------- fetch：从 GitHub 拉取指定版本的检出 ----------------
@@ -1783,6 +2329,7 @@ main() {
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
     base|fetch|help|-h|--help ) : ;;
+    state ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -1798,6 +2345,7 @@ main() {
     backup ) shift; cmd_backup "$@" ;;
     logs|log ) shift; cmd_logs "$@" ;;
     base|root ) shift; cmd_base "$@" ;;
+    state ) shift; cmd_state "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     fetch|download|dl ) shift; cmd_fetch "$@" ;;
     help|-h|--help ) cmd_help ;;
