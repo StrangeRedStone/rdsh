@@ -37,7 +37,7 @@ scan_guard() {  # <模式: files|repo>
 }
 
 # ---- 白名单：只有这些文件会被发布（写死，不用通配符扫目录） ----
-FILES="Rdsh.sh migrate.sh reindex-workspaces.sh plugin-sync.sh rdsh-restart.sh patch-manager.sh doctor.sh scan-secrets.sh"
+FILES="Rdsh.sh migrate.sh reindex-workspaces.sh plugin-sync.sh rdsh-restart.sh patch-manager.sh doctor.sh scan-secrets.sh bootstrap.sh"
 
 usage() {
   echo "publish.sh —— 把本机的 rdsh 脚本集中进发布仓库（单向：本机 -> 仓库）"

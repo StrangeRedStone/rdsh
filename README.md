@@ -37,6 +37,8 @@
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]` | **衍生物账本**：回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 注册表陈旧 / 启动日志的体积与份数。**默认只列不删**；`--purge` 才是真删（备份类必须给 `--older-than`；回收项小于 `RDSH_TRASH_KEEP_DAYS`（默认 7 天）要 `--force`） |
 | `rdsh trash ls / restore <条目名\|--last> [--force]` | **回收站**（"永不 rm"的落点）：每个条目自带清单（原路径 / 体积 / 原因 / 逐项还原命令 / 跨设备标记）。`restore` 目标已存在则跳过不覆盖，`--force` 才腾位 |
+| `bootstrap.sh [--base <路径>] [--from <目录\|tarball>] [--with-dsh <版本>] [--dry-run]` | **蛋生鸡**：新机器上还没有 rdsh 时用它（独立可跑）。七步：依赖自检 → 取本体（clone / 离线）→ 建目录 → **写配置（只补缺键）** → 落 `rdsh` 入口软链 → 可选装一个 dsh → 三条只读命令验收。全程留日志 |
+| `rdsh selfupdate [--from <目录>] [--repo <url>] [--dry-run] [--quick]` | 更新 rdsh **自己**：备份回滚点 → 语法 + 隐私守卫 + 冒烟 → **原子替换**（临时名 + mv）→ 失败自动回滚。回滚点就是 `--from` 的 `.dsh-suite/backup/dsh-scripts-*` |
 | `rdsh bridge --spec [--json]` | **门面契约**：把 rdsh 的能力清单（id/子命令/参数/风险等级/默认参数）交给 dsh 插件。插件只是注册器 —— 加子命令不用改插件；危险能力的默认（dry-run / 只出计划）在契约里就定死 |
 | `rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--force] [--log <文件>]` | 重启入口（转发 `rdsh-restart.sh`：systemd-run 逃逸舱 + 等端口释放 + 无人值守 headless 接手）。**输出落点会打印出来**（在 systemd 托管的 dsh 里，脚本按设计写日志文件而不是 stdout） |
 | `rdsh wake ls\|show <会话id>` | **只读**看唤醒台账：重启后要续转哪些会话（目录 `<数据 home>/wake/<会话id>.json`） |
@@ -149,6 +151,24 @@ rdsh start
 老机器首次用：`rdsh state --init`。它会从现有检出（`.installed` 的 mtime、git remote、HEAD）和旧 `回退基线.md` **反向推断**，**逐条打印它推断了什么**，并把旧的手写文件移进 `$STATE_ROOT/回退基线-历史.md` 留档（`mv`，原文不改，还原命令会打印）。
 
 > `.installed` 写在检出里，所以 `rdsh` 会把它加进 `.git/info/exclude`（本地生效、不进上游）——否则它会污染 `git status`，动摇补丁工具的"干净树"前提。
+
+## 装到新机器（蛋生鸡，0.8.0 起）
+
+新机器上还**没有** rdsh 时，用它自己的入口：
+
+```bash
+# 1) 取到本体（离线可用 --from <已 clone 的目录|tarball>）
+bash bootstrap.sh --base ~/Mapp
+
+# 2) 顺手装一个 dsh（可选）
+bash bootstrap.sh --with-dsh latest
+
+# 想先看计划：bash bootstrap.sh --dry-run
+```
+
+七步：**依赖自检**（缺谁点名并给安装命令）→ **取本体**（clone 默认 SSH、失败自动试 HTTPS；目标已是 git 检出则 `pull --ff-only`，幂等）→ **建目录**（`.dsh-suite/{data,shared,backup,logs,state,run,debug,plugins,patches,trash}`）→ **写配置**（`~/.config/rdsh/config`，**只补缺键、绝不覆盖已有值**，显式写全套根以对齐 `.dsh-suite/` 布局）→ **落入口**（`<检出>/rdsh` + `~/.local/bin/rdsh`）→ **可选装 dsh** → **验收**（`rdsh base` / `doctor` / `bridge --spec`）。日志落 `<BASE>/.dsh-suite/logs/bootstrap-<ts>.log`。
+
+之后自更新用 `rdsh selfupdate`：**先备份回滚点**（`dsh-scripts-<ts>/` + `MD5SUMS`）→ **先校验**（语法 + 隐私守卫 + 冒烟，都在源目录里跑、不碰本机）→ **原子替换**（临时名 + `mv`，运行中的脚本靠 inode 续命）→ **失败自动回滚**。校验不过**一个字节都不装**。
 
 ## 能力与界面的分层（作法，0.7.0 起）
 

@@ -37,6 +37,8 @@ printf 'cwd=/%s/%s/Mapp/dsh\n' 'home' 'someone' > "$F/homepath.txt"
 printf '联系 %s\n' "foo.bar$(printf '@')gmail.com" > "$F/mail.txt"
 printf '# 干净文档\n- 无敏感内容\n' > "$F/plain/ok.md"
 printf 'token=***\napi_key=<YOUR_KEY>\nsee example.com docs\n' > "$F/plain/placeholders.md"
+# VCS 的 user@host 不是个人信息：`git@github.com` 在 git URL 里天天出现，不该报 W3
+printf 'REPO="${RDSH_SELF_REPO:-%s}"\n' "git$(printf '@')github.com:org/repo.git" > "$F/plain/giturl.md"
 printf 'objects\n' > "$F/.git/config"
 printf '\x89PNG\r\n\x1a\n' > "$F/bin/pic.png"
 printf 'cwd=/%s/%s/notes\n' 'home' 'someone' > "$F/plain/note.log"   # 非跳过扩展名 → 会被扫（含 W2 命中以便断言）
@@ -61,6 +63,11 @@ echo '--- 2) 占位/掩码不报噪声 ---'
 out="$(bash "$SRC" --files "$F/plain/placeholders.md" 2>&1)"; rc=$?
 rc_is "$rc" 0 '占位/掩码文件判为干净'
 hasnt "$out" 'W1' 'token=*** 不触发赋值型密钥'
+
+echo '--- 2.5) VCS 地址不报 W3（前缀类里不能否掉 `-`） ---'
+out="$(bash "$SRC" --files "$F/plain/giturl.md" 2>&1)"; rc=$?
+rc_is "$rc" 0 'git@github.com 这样的 VCS 地址不报邮箱'
+hasnt "$out" 'W3' '没有 W3 命中'
 
 echo '--- 3) error 级规则逐条命中 ---'
 out="$(bash "$SRC" --files "$F/privkey.txt" 2>&1)"; rc=$?

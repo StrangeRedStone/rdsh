@@ -147,7 +147,11 @@ echo '--- 8) 真机 restart --dry-run：在跑的实例 PID 必须不变 ---'
 pid3080() { ss -ltnp 2>/dev/null | grep -F ':3080' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
 P0="$(pid3080)"
 if [ -n "$P0" ]; then
-  bash "$HOME/Mapp/dsh/Rdsh.sh" restart --dry-run --log "$T/restart-dry.log" >/dev/null 2>&1
+  # 这条断言说的是**真机**，所以必须清掉被注入的 RDSH_BASE/RDSH_CONFIG 再跑
+  # （否则真机脚本会去临时 BASE 里找实例，找不到就早退，日志里自然没有那句"未做任何改动"）
+  env -u RDSH_BASE -u RDSH_CONFIG -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+      -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_TRASH -u DSH_LOG_DIR \
+      bash "$HOME/Mapp/dsh/Rdsh.sh" restart --dry-run --log "$T/restart-dry.log" >/dev/null 2>&1
   P1="$(pid3080)"
   [ "$P0" = "$P1" ] && ok "restart --dry-run 没动在跑的实例（PID $P0 不变）" || bad "dry-run 竟然动了实例：$P0 → $P1"
   has "$(cat "$T/restart-dry.log" 2>/dev/null)" '未做任何改动' '日志里明确写了"未做任何改动"'

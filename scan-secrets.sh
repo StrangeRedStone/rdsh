@@ -75,7 +75,9 @@ EMAIL_RE='[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
 # 占位/掩码/示例不算命中（否则文档里的 token=*** 会天天报噪声）
 PLACEHOLDER_RE='\*\*\*|…|<|\$\(|\$[A-Za-z_]|\{\{|example|placeholder|EXAMPLE|PLACEHOLDER|redacted|REDACTED|xxxxxx'
 # 邮箱规则单独一套排除：普通占位过滤会连 "admin@example.org" 一起滤掉
-EMAIL_EXCLUDE_RE='example\.(com|org|net)|noreply|no-reply|@localhost|@example'
+# 注意（踩过）：前缀类里**不能包含 `-`** —— `${VAR:-git@host}` 里 git@ 前面正是 `-`，
+# 把 `-` 也否掉等于让这条排除永远匹配不上（于是 git 地址天天报 W3）。
+EMAIL_EXCLUDE_RE='(noreply|no-reply|example|EXAMPLE|localhost|admin@example\.org|(^|[^A-Za-z0-9._%])(git|ssh|hg|svn|root)@)'
 
 real_path() {  # <路径（模式内的相对路径）> → 可用于 cat/du 的真实路径
   case "$MODE" in

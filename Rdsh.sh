@@ -82,6 +82,9 @@
 #                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
 #                                         #   必报"检查了几个对象"，总数为 0 时报 error；
 #                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
+#   rdsh selfupdate [--from <目录>] [--repo <url>] [--dry-run] [--quick]
+#                                         # 更新 rdsh **自己**：备份 → 语法/隐私守卫/冒烟 → 原子替换
+#                                         #   → 失败自动回滚；回滚点就是 `--from` 的备份目录
 #   rdsh bridge --spec [--json]          # **门面契约**：把能力清单交给 dsh 插件
 #                                         #   （作法：功能靠脚本、界面靠插件；插件只是注册器）
 #   rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--timeout N] [--force] [--log <文件>]
@@ -2940,7 +2943,11 @@ cmd_trash() {
         i=$((i+1))
       done
       ( umask 077; printf 'restored_at=%s\n' "$(date -Is)" >> "$mf" )
-      log "还原完成：$moved 项$([ "$skipped" -gt 0 ] && printf '，跳过 %s 项' "$skipped")"
+      if [ "$dry" = "1" ]; then
+        log "计划还原 $moved 项（--dry-run：**未动任何文件**）$([ "$skipped" -gt 0 ] && printf '，将跳过 %s 项' "$skipped")"
+      else
+        log "还原完成：$moved 项$([ "$skipped" -gt 0 ] && printf '，跳过 %s 项' "$skipped")"
+      fi
       log '（条目目录保留作痕迹；rdsh du --purge trash 可清理）'
       ;;
     -h|--help|help)
@@ -3643,6 +3650,193 @@ cmd_retire() {
   [ "$failed" = "0" ] || { warn "$failed 个目标未退役"; return 1; }
 }
 
+# ---------------- selfupdate：rdsh 更新自己（B10） ----------------
+# 三点纪律：
+#   ① **先备份再动**：整份脚本进 $BACKUP_ROOT/dsh-scripts-<ts>/（带 MD5SUMS）——这是回滚点
+#   ② **先校验再装**：语法（全部 *.sh）+ 隐私守卫 + 冒烟（默认全跑，--quick 可跳）都过才替换
+#   ③ **原子替换**：新文件先写同目录临时名再 mv（运行中的 Rdsh.sh 靠 inode 续命，
+#      原地截断会让正在跑的脚本读到半个文件而崩）
+SELF_REPO_DEFAULT="git@github.com:StrangeRedStone/rdsh.git"
+
+self_scripts() {  # 本机 rdsh 的全部脚本（每行一个相对路径）
+  local f
+  [ -f "$MANAGE_ROOT/Rdsh.sh" ] && printf 'Rdsh.sh\n'
+  for f in "$MANAGE_ROOT"/*.sh; do [ -f "$f" ] && printf '%s\n' "$(basename "$f")"; done | sort -u
+  for f in "$MANAGE_ROOT"/tools/*.sh; do [ -f "$f" ] && printf 'tools/%s\n' "$(basename "$f")"; done | sort -u
+}
+
+self_backup() {  # → stdout 备份目录
+  local dir="$BACKUP_ROOT/dsh-scripts-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$dir/tools"
+  local rel n=0
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    cp -p "$MANAGE_ROOT/$rel" "$dir/$rel" 2>/dev/null && n=$((n+1))
+  done < <(self_scripts)
+  ( cd "$dir" && md5sum $(self_scripts | tr '\n' ' ') > MD5SUMS 2>/dev/null ) || true
+  printf '%s' "$dir"
+}
+
+self_restore() {  # <备份目录>：把脚本还原回去（**这个函数只还原脚本，不动其它资产**）
+  local dir="$1" rel n=0
+  [ -d "$dir" ] || { warn "备份目录不存在：$dir"; return 1; }
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -f "$dir/$rel" ] || continue
+    cp -p "$dir/$rel" "$MANAGE_ROOT/$rel.tmp.$$" && mv -f "$MANAGE_ROOT/$rel.tmp.$$" "$MANAGE_ROOT/$rel" && n=$((n+1))
+  done < <(self_scripts)
+  [ -x "$MANAGE_ROOT/Rdsh.sh" ] || chmod +x "$MANAGE_ROOT/Rdsh.sh" 2>/dev/null || true
+  log "  已从备份还原 $n 个脚本：$dir"
+}
+
+self_verify() {  # <源目录>：语法 + 隐私守卫 + 冒烟（全部在源目录里跑，**不碰本机**）
+  local src="$1" f bad=0
+  log '  校验 1/3：语法（bash -n 全部脚本）'
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    bash -n "$src/$f" 2>/dev/null || { warn "  语法错误：$f"; bad=1; }
+  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh tools/*.sh 2>/dev/null; } | sort -u)
+  [ "$bad" = "0" ] || return 1
+  if [ "$QUICK" != "1" ] && [ -f "$src/scan-secrets.sh" ]; then
+    log '  校验 2/3：隐私守卫（扫源目录）'
+    bash "$src/scan-secrets.sh" --path "$src" --quiet >/dev/null 2>&1
+    local rc=$?
+    [ "$rc" = "2" ] && { warn '  隐私守卫发现 error → 拒绝安装'; return 1; }
+    [ "$rc" = "1" ] && warn '  隐私守卫有 warn（不阻塞）'
+  fi
+  if [ "$QUICK" != "1" ] && [ -d "$src/tools" ]; then
+    log '  校验 3/3：冒烟（隔离 BASE，逐个跑）'
+    local sm ran=0
+    for sm in "$src"/tools/smoke-*.sh; do
+      [ -f "$sm" ] || continue
+      case "$(basename "$sm")" in smoke-scan.sh) bash "$sm" "$src/scan-secrets.sh" >/dev/null 2>&1 || { warn "  冒烟失败：$(basename "$sm")"; return 1; } ;; esac
+      case "$(basename "$sm")" in smoke-scan.sh) ran=$((ran+1)); continue ;; esac
+      bash "$sm" "$src/Rdsh.sh" >/dev/null 2>&1 || { warn "  冒烟失败：$(basename "$sm")"; return 1; }
+      ran=$((ran+1))
+    done
+    log "  冒烟通过 $ran 个"
+  fi
+  return 0
+}
+
+self_install() {  # <源目录>：原子替换（临时名 + mv）
+  local src="$1" rel n=0
+  mkdir -p "$MANAGE_ROOT/tools"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ -f "$src/$rel" ] || continue
+    cp -p "$src/$rel" "$MANAGE_ROOT/$rel.tmp.$$" || { warn "  写入失败：$rel"; return 1; }
+    mv -f "$MANAGE_ROOT/$rel.tmp.$$" "$MANAGE_ROOT/$rel" || return 1
+    n=$((n+1))
+  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh 2>/dev/null; ls -1 tools/*.sh 2>/dev/null; } | sort -u)
+  chmod +x "$MANAGE_ROOT"/*.sh 2>/dev/null || true
+  [ -d "$MANAGE_ROOT/tools" ] && chmod +x "$MANAGE_ROOT"/tools/*.sh 2>/dev/null || true
+  log "  已安装 $n 个脚本"
+}
+
+cmd_selfupdate() {
+  local src="" repo="$SELF_REPO_DEFAULT" keep="${SELF_KEEP:-5}" a
+  QUICK=0
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --from) shift; src="${1:?--from 需要目录}" ;;
+      --from=*) src="${a#--from=}" ;;
+      --repo) shift; repo="${1:?--repo 需要 URL}" ;;
+      --repo=*) repo="${a#--repo=}" ;;
+      --dry-run|-n) DRY_RUN=1 ;;
+      --quick) QUICK=1 ;;
+      --keep) shift; keep="${1:-5}" ;;
+      -*) die "未知选项：$a（rdsh selfupdate [--from <目录>] [--repo <url>] [--dry-run] [--quick] [--keep N]）" ;;
+      *) die "多余参数：$a" ;;
+    esac
+    shift || true
+  done
+  DRY_RUN="${DRY_RUN:-0}"
+  local tmp=""
+  if [ -z "$src" ]; then
+    tmp="$(mktemp -d)"; src="$tmp/repo"
+    log "取新版本：clone $repo → $src"
+    if [ "$DRY_RUN" = "1" ]; then
+      echo "  [dry-run] git clone --depth 1 $repo $src"
+    else
+      git clone --quiet --depth 1 "$repo" "$src" 2>/dev/null \
+        || git clone --quiet --depth 1 "${repo/git@github.com:/https://github.com/}" "$src" 2>/dev/null \
+        || { [ -n "$tmp" ] && rm -rf "$tmp"; die 'clone 失败：检查网络/SSH key（--repo 可指定）'; }
+    fi
+  else
+    [ -d "$src" ] || die "源目录不存在：$src"
+    src="$(readlink -f "$src")"
+  fi
+  # 源里必须有 Rdsh.sh（否则不是 rdsh 仓库/目录）
+  if [ "$DRY_RUN" = "1" ] && [ ! -d "$src" ]; then
+    echo '  [dry-run] 之后：备份 → 校验 → 原子替换 → 记流水'
+    return 0
+  fi
+  [ -f "$src/Rdsh.sh" ] || { [ -n "$tmp" ] && rm -rf "$tmp"; die "源里没有 Rdsh.sh：$src"; }
+
+  local old_sha new_sha
+  old_sha="$(md5sum "$MANAGE_ROOT/Rdsh.sh" 2>/dev/null | cut -c1-8)"
+  new_sha="$(md5sum "$src/Rdsh.sh" 2>/dev/null | cut -c1-8)"
+  log "本机 Rdsh.sh md5:$old_sha → 新副本 md5:$new_sha"
+  if [ "$old_sha" = "$new_sha" ]; then
+    log '内容相同（没变化）→ 不折腾。仍要强制覆盖可加 --keep 0 后手工 cp'
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    echo "  [dry-run] 备份 → $BACKUP_ROOT/dsh-scripts-<ts>/"
+    echo '  [dry-run] 校验：语法 + 隐私守卫 + 冒烟（--quick 只跑语法/守卫）'
+    echo "  [dry-run] 原子替换：$(cd "$src" && ls -1 *.sh tools/*.sh 2>/dev/null | wc -l) 个文件"
+    echo '  [dry-run] 失败则从备份还原；成功记 state 流水'
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    return 0
+  fi
+
+  log '① 备份当前脚本'
+  local bk; bk="$(self_backup)"
+  log "  回滚点：$bk（$(du_count "$bk"/*) 个文件）"
+  log '② 校验新副本'
+  if ! self_verify "$src"; then
+    warn '校验未通过 → **不安装**（本机一个字节都没动）'
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    st_journal_soft selfupdate "校验失败，未安装（源 $src）"
+    return 1
+  fi
+  log '③ 原子替换'
+  if ! self_install "$src"; then
+    warn '安装中断 → 从备份还原'
+    self_restore "$bk"
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    st_journal_soft selfupdate "安装失败，已回滚（备份 $bk）"
+    return 1
+  fi
+  log '④ 装后自检'
+  if ! bash -n "$MANAGE_ROOT/Rdsh.sh" 2>/dev/null; then
+    warn '装后语法检查失败 → 从备份还原'
+    self_restore "$bk"
+    st_journal_soft selfupdate "装后自检失败，已回滚（备份 $bk）"
+    [ -n "$tmp" ] && rm -rf "$tmp"
+    return 1
+  fi
+  # 清理旧备份（保留 keep 份）
+  if [ "$keep" -gt 0 ] 2>/dev/null; then
+    local i=0 d
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      i=$((i+1))
+      [ "$i" -gt "$keep" ] && { trash_mv --label "selfupdate-old-backup" --reason "selfupdate 保留最近 $keep 份脚本备份" "$d" >/dev/null 2>&1 || true; }
+    done < <(ls -1dt "$BACKUP_ROOT"/dsh-scripts-*/ 2>/dev/null || true)
+  fi
+  st_journal_soft selfupdate "更新成功：$old_sha → $(md5sum "$MANAGE_ROOT/Rdsh.sh" | cut -c1-8)（回滚点 $bk）"
+  log "完成。回滚：bash $MANAGE_ROOT/Rdsh.sh selfupdate --from $bk"
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  return 0
+}
+
+st_journal_soft() {  # 账本可用就记流水，不可用就跳过（不因账本坏了挡住自更新）
+  if [ -f "$STATE_KV" ] && command -v state_journal >/dev/null 2>&1; then state_journal "$1" "${2:-self}" "$3" 2>/dev/null || true; fi
+  return 0
+}
+
 # ---------------- bridge：给 dsh 插件的**门面契约**（B9） ----------------
 # 作法：**功能靠外部脚本，界面靠 dsh 插件**。
 #   于是插件不该自己实现任何逻辑 —— 它只需要知道"rdsh 有哪些能力、怎么调、危险等级"。
@@ -4002,10 +4196,12 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets|restart|bridge ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|restart|bridge|selfupdate|self-update ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     restore|retire|settings|setting ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     wake ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    # selfupdate 更新的是**脚本自己**，不依赖任何 dsh 检出 —— 新机器上第一次就要能用（B10）
+    selfupdate|self-update ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -4029,6 +4225,7 @@ main() {
     settings|setting ) shift; cmd_settings "$@" ;;
     restart ) shift; cmd_restart "$@" ;;
     bridge ) shift; cmd_bridge "$@" ;;
+    selfupdate|self-update ) shift; cmd_selfupdate "$@" ;;
     wake ) shift; cmd_wake "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
