@@ -75,9 +75,14 @@ jobs:
 
       - name: 扫描（error 级阻塞，warn 级咨询）
         run: |
+          # 注意：GitHub 的 run: 默认是 `bash -e`，而守卫"只有 warn"时退 1 ——
+          # 必须显式容忍 rc=1，否则 warn 会把 CI 误判为失败（与"warn 咨询"的定位矛盾）
+          set +e
           bash scan-secrets.sh --path . --quiet
           rc=$?
-          if [ "$rc" = 2 ]; then echo "隐私守卫发现 error：公开仓不能这样发"; exit 1; fi
+          set -e
+          echo "隐私守卫退出码：$rc（0 干净 / 1 有 warn / 2 有 error）"
+          if [ "$rc" = 2 ]; then echo "公开仓不能这样发：先清掉 error 级命中项"; exit 1; fi
           echo "ok  无 error（warn 级见上）"
 
   shellcheck:
