@@ -187,15 +187,27 @@ dim_entries() {
 }
 
 # 账本列号：**从表头解析**，不写死 —— 字段顺序变了 doctor 也不该跟着错
-kv_col() {  # <字段名> → 列号（失败返回 1）
-  local want="$1" hdr
+kv_col() {  # <字段名> → 列号（解析不到返回 1）
+  local want="$1" hdr n f
   [ -f "$STATE_KV" ] || return 1
   hdr="$(sed -nE 's/^# 字段:[[:space:]]*(.*)$/\1/p' "$STATE_KV" | head -1)"
-  [ -n "$hdr" ] || return 1
-  awk -F'|' -v w="$want" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}' <<<"$hdr"
+  if [ -n "$hdr" ]; then
+    n="$(awk -F'|' -v w="$want" '{for(i=1;i<=NF;i++) if($i==w){print i; exit}}' <<<"$hdr")"
+    [ -n "$n" ] && { printf '%s' "$n"; return 0; }
+  fi
+  # 表头缺这个字段（老 kv）→ 用内置字段顺序兜底（越界只会取到空值，不会取错）
+  n=1
+  for f in key version role role_set_at installed_at source commit built_at migrated_from baseline_for dir data note settings settings_sha; do
+    [ "$f" = "$want" ] && { printf '%s' "$n"; return 0; }
+    n=$((n+1))
+  done
+  return 1
 }
 kv_get() {  # <对象键> <字段> → 值
+  # 关键：列号为空时**必须直接返回空** —— `awk -v c="" ... print $c` 里 $c 会退化成 $0，
+  # 把整行当成字段值（B8 实测踩到：老表头没有 settings 字段 → "settings 文件丢了" 误报）
   local col; col="$(kv_col "$2")" || return 0
+  [ -n "$col" ] || return 0
   awk -F'|' -v k="$1" -v c="$col" '$1==k && !/^#/{print $c; exit}' "$STATE_KV"
 }
 kv_by_dir() {  # <检出目录> → 对象键
@@ -337,6 +349,22 @@ dim_state() {
       if { [ -n "$dir" ] && [ ! -d "$dir" ]; } || { [ -n "$data" ] && [ ! -d "$data" ]; }; then
         find_f error state "$k 是回退基线，但它的检出或数据不完整 → 回退能力不成立"
       fi
+    fi
+    # settings.yaml（B8）：账本登记的路径与 sha 是否与磁盘一致（漂移可见）
+    local sfile ssha sreg
+    sfile="$(kv_get "$k" settings)"; sreg="$(kv_get "$k" settings_sha)"
+    if [ -n "$sfile" ]; then
+      if [ ! -f "$sfile" ]; then
+        find_f warn state "$k：账本登记的 settings 不存在（$sfile）"; say "  [warn]  $k：settings 文件丢了"
+      else
+        ssha="$(sha256sum "$sfile" 2>/dev/null | cut -c1-8)"
+        if [ -n "$sreg" ] && [ "$sreg" != "$ssha" ]; then
+          find_f info state "$k：settings.yaml 与账本指纹不符（账本 $sreg → 磁盘 $ssha）—— 文件被改过或换过版本"
+          say "  [info]  $k：settings 指纹漂移（$sreg → $ssha）"
+        fi
+      fi
+    elif [ -n "$(kv_get "$k" data)" ] && [ ! -f "$(kv_get "$k" data)/settings.yaml" ]; then
+      :   # 该 home 本来就没有 settings.yaml（dsh 首启才写）→ 正常，不报
     fi
     # 回声一致性：比**内容**（role/key），不比流水行号 —— 流水行号是游标，
     # 任何单对象事件都会让其它回声"落后一位"，拿它当问题是噪声（元资产陷阱）

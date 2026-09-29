@@ -2,6 +2,25 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.6.0 — 2026-09-30
+
+### 新增
+
+- **`rdsh settings show|keys|carry|register` —— settings.yaml 的携带与登记**：
+  - **明确不做稳定根软链**：顶层键随版本 schema 变（实测 `0.1.3-alpha.2` 8 个键、`0.1.6-alpha.1` 12 个），共享一份会让新版本读到不认识的键、旧版本读到缺失的键。
+  - `carry` 是 **schema 感知合并**：**同名键取源值**（用户的选择）/ **目标独有键保留**（新 schema 自己的）/ **源独有键附带并告警**（放在带标记的块里，说明可能被忽略）；旧文件先进回收站（可还原）；`--dry-run` 逐键列出将发生的变化。
+  - **账本登记**：新增 `settings`（路径）与 `settings_sha`（短指纹）两个字段（写入时自动升级 kv 表头，doctor 靠表头解析列号）；检出内 `.installed` 回声同步带上。
+  - `settings show` 报"与账本一致 / 与账本不符（账本记 X）"—— 漂移一眼可见。
+- `migrate.sh` 新增 **4.5 步**：自动调用 `settings carry`（`--dry-run` 时预演）。
+- `doctor` 新增：账本登记的 settings 文件不存在（warn）/ 指纹漂移（info）。
+- `tools/smoke-settings.sh`（29 项断言）+ CI 一步。
+
+### 修复（冒烟抓出）
+
+- **`local -a x` 只是声明**：`set -u` 下 `${#x[@]}` 仍报"未绑定变量"——`settings carry` 因此在两份文件都存在时直接报错退出。必须显式 `local -a x=()`。
+- `state --init` 播种时没有登记 settings（只有 `install` 路径登记）→ `settings show` 看不到指纹。
+- dry-run 的逐键差异原来比较"块的第一行"（就是键名本身）→ 永远相等、永远不打印；改为多行块说"内容不同（N 行 → M 行）"、单行块才显示 `旧 → 新`。
+
 ## 0.5.3 — 2026-09-29
 
 ### 新增

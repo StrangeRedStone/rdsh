@@ -62,6 +62,11 @@ jobs:
           set -e
           bash tools/smoke-backup-restore.sh ./Rdsh.sh
 
+      - name: 功能冒烟（隔离 BASE：settings 携带与登记）
+        run: |
+          set -e
+          bash tools/smoke-settings.sh ./Rdsh.sh
+
       - name: 功能冒烟（隔离 BASE：同版本共存编号）
         run: |
           set -e

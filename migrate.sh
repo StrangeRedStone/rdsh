@@ -240,6 +240,21 @@ copy_once() {  # <相对路径>：目标缺才拷，绝不覆盖
 copy_once storages
 copy_once settings.yaml
 copy_once .credentials.yaml
+# ---- 4.5 settings.yaml：schema 感知携带（B8）----
+# 为什么单独一步：settings.yaml 的顶层键随版本 schema 变（实测 0.1.3-alpha.2 有 8 个键、
+# 0.1.6-alpha.1 有 12 个）。上面 copy_once 只在"目标为空"时整份拷，遇到"目标已有"就什么都不做；
+# 这一步做**合并**：同名键取源值（用户的选择）、目标独有键保留（新 schema 自己的）、
+# 源独有键附带并告警（新版本可能不认识）。旧文件先挪进回收站（可还原），并在账本里登记 sha 指纹。
+if [ -f "$MANAGE_ROOT/Rdsh.sh" ]; then
+  step "4.5/7 settings.yaml（schema 感知携带 + 账本登记）"
+  if [ "$DRY" = "1" ]; then
+    bash "$MANAGE_ROOT/Rdsh.sh" settings carry "$SRC_HOME" "$DST_HOME" --dry-run 2>&1 | sed 's/^/    /' || warn 'settings 携带预演失败（不影响迁移）'
+  else
+    bash "$MANAGE_ROOT/Rdsh.sh" settings carry "$SRC_HOME" "$DST_HOME" 2>&1 | sed 's/^/    /' || warn 'settings 携带失败（文件仍由 L1 复制的那份保留）'
+  fi
+else
+  warn "找不到 $MANAGE_ROOT/Rdsh.sh → 跳过 settings schema 感知携带（只有 L1 的整份复制）"
+fi
 if [ "$CARRY_SESSIONS" = "all" ]; then
   copy_once sessions
 else

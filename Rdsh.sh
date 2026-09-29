@@ -82,6 +82,9 @@
 #                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
 #                                         #   必报"检查了几个对象"，总数为 0 时报 error；
 #                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
+#   rdsh settings show|keys|carry|register
+#                                         # settings.yaml：**每版本一份真文件**（顶层键随 schema 变，
+#                                         #   不做稳定根软链）；carry 是 schema 感知携带；登记进账本
 #   rdsh retire [<目标…>] [--plan|--apply] [--force]
 #                                         # **退役**：把五类足迹（检出/数据 home/home 内插件链/
 #                                         #   指向它们的**外部软链**/日志+注册表+.map+账本）逐项清点后
@@ -2030,7 +2033,7 @@ cmd_logs() {
 #   回声 : <检出>/.installed —— KEY=VALUE；存在仍表示"已构建"，并已加进 .git/info/exclude
 #   视图 : $BASELINE_MD   —— 人读；由上面三者生成，不再手写
 # 原则不变（P1）：只检测、只留痕、只放行；历史只追加，删除留墓碑。
-STATE_FIELDS="key version role role_set_at installed_at source commit built_at migrated_from baseline_for dir data note"
+STATE_FIELDS="key version role role_set_at installed_at source commit built_at migrated_from baseline_for dir data note settings settings_sha"
 STATE_ROLES="installed current baseline retire-candidate retired"
 
 state_ensure() {
@@ -2080,7 +2083,8 @@ state_kv_set() {  # <对象键> <字段> <值>：行不存在则新建；原子�
   local nf; nf="$(printf '%s' "$STATE_FIELDS" | wc -w)"
   local tmp="$STATE_KV.tmp.$$"
   ( umask 077
-    awk -F'|' -v OFS='|' -v k="$1" -v c="$col" -v v="$v" -v nf="$nf" '
+    awk -F'|' -v OFS='|' -v k="$1" -v c="$col" -v v="$v" -v nf="$nf" -v fields="$STATE_FIELDS" '
+      /^# 字段:/ { printf "# 字段: %s\n", fields; next }
       /^#/ { print; next }
       NF==0 { next }
       { if ($1==k) { found=1; $c=v } print }
@@ -2106,6 +2110,12 @@ state_role_of() {  # <对象键> → 角色（无则 -）
 state_key_for_dir() {  # <检出目录> → 对象键（按 dir 字段找）
   [ -f "$STATE_KV" ] || return 0
   local col; col="$(state_col_of dir)" || return 0
+  awk -F'|' -v d="$1" -v c="$col" '!/^#/ && NF>0 && $c==d { print $1; exit }' "$STATE_KV"
+}
+
+state_key_for_data() {  # <数据 home> → 对象键
+  [ -f "$STATE_KV" ] || return 0
+  local col; col="$(state_col_of data)" || return 0
   awk -F'|' -v d="$1" -v c="$col" '!/^#/ && NF>0 && $c==d { print $1; exit }' "$STATE_KV"
 }
 
@@ -2156,6 +2166,8 @@ state_echo_installed() {  # <检出目录>：把账本回写成 .installed（KEY
       printf 'built_at=%s\n'       "$(state_kv_get "$key" built_at)"
       printf 'migrated_from=%s\n'  "$(state_kv_get "$key" migrated_from)"
       printf 'baseline_for=%s\n'   "$(state_kv_get "$key" baseline_for)"
+      printf 'settings=%s\n'       "$(state_kv_get "$key" settings)"
+      printf 'settings_sha=%s\n'   "$(state_kv_get "$key" settings_sha)"
       printf 'state_journal_lines=%s\n' "$n"
     } > "$dir/.installed" )
 }
@@ -2218,6 +2230,11 @@ state_record_install() {  # <检出目录> [角色]：安装完成时登记（�
   state_kv_set "$key" dir "$dir"
   state_kv_set "$key" data "$(state_data_for_dir "$dir")"
   state_git_exclude "$dir"
+  local shome sfile; shome="$(state_data_for_dir "$dir")"; sfile="$(settings_file_of "$shome")"
+  if [ -f "$sfile" ]; then
+    state_kv_set "$key" settings "$sfile"
+    state_kv_set "$key" settings_sha "$(settings_sha8 "$sfile")"
+  fi
   state_echo_installed "$dir"
   state_journal install "$key" "dir=$dir role=$role source=$src"
   log "已登记状态：$key（role=$role）"
@@ -2378,7 +2395,17 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     # 同版本第二份的键与首份相同（都从版本号起算），只看"行存在"会把它误判成"已登记"而跳过。
     local kdir; kdir="$(state_kv_get "$key" dir)"
     if [ -n "$kdir" ] && [ "$kdir" = "$dir" ]; then
-      printf '  已登记  %-18s %s\n' "$key" "$dir"; registered=$((registered+1)); continue
+      # 自愈：老账本缺后来新增的字段（如 B8 的 settings/settings_sha）→ 顺手补上
+      local h0 f0
+      h0="$(state_kv_get "$key" data)"; f0="$(settings_file_of "${h0:-$DATA_ROOT/$ver}")"
+      if [ -f "$f0" ] && [ -z "$(state_kv_get "$key" settings_sha)" ]; then
+        state_kv_set "$key" settings "$f0"
+        state_kv_set "$key" settings_sha "$(settings_sha8 "$f0")"
+        printf '  已登记  %-18s %s  （补登 settings 指纹）\n' "$key" "$dir"
+      else
+        printf '  已登记  %-18s %s\n' "$key" "$dir"
+      fi
+      registered=$((registered+1)); continue
     fi
     # B7 扫重：键已被别的检出占用 → 这是同版本的又一份，分配次号（max+1，含墓碑，绝不重用）
     local other; other="$kdir"
@@ -2419,6 +2446,12 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     # 同版本第二份刚拿到次号时，data 必须是**新键**的 home（ENTRIES 是登记前的缓存，会指向首份）
     state_kv_set "$key" data "${data_override:-$(state_data_for_dir "$dir")}"
     state_kv_set "$key" role installed
+    # settings.yaml 的登记（B8）：路径 + sha 指纹（同版本第二份要用**新键**的 home）
+    local sh0 sf0; sh0="${data_override:-$(state_data_for_dir "$dir")}"; sf0="$(settings_file_of "$sh0")"
+    if [ -f "$sf0" ]; then
+      state_kv_set "$key" settings "$sf0"
+      state_kv_set "$key" settings_sha "$(settings_sha8 "$sf0")"
+    fi
     state_kv_set "$key" note '由 state --init 播种'
     state_git_exclude "$dir"
     state_echo_installed "$dir"
@@ -3227,6 +3260,169 @@ cmd_restore() {
   return 0
 }
 
+# ---------------- settings：settings.yaml 的携带与登记（B8） ----------------
+# 为什么**不**做稳定根软链：settings.yaml 的顶层键随版本 schema 变（实测 0.1.3-alpha.2 有 8 个键、
+# 0.1.6-alpha.1 有 12 个）——共享一份会让新版本读到不认识的键、旧版本读到缺失的键。
+# 所以：**每版本一份真文件** + 迁移时**显式携带**（schema 感知）+ 在账本里登记（路径 + 指纹）。
+settings_file_of() {  # <数据 home | settings.yaml 路径> → settings.yaml 路径
+  case "$1" in */settings.yaml) printf '%s' "$1" ;; *) printf '%s/settings.yaml' "${1%/}" ;; esac
+}
+settings_home_of() {  # <版本|序号|目录|文件> → 数据 home
+  local arg="$1" e
+  case "$arg" in */settings.yaml) dirname "$arg"; return 0 ;; esac
+  if [ -d "$arg" ]; then printf '%s' "${arg%/}"; return 0; fi
+  e="$(resolve_target "$arg" 2>/dev/null || true)"
+  case "$e" in UNMANAGED:*|"") die "找不到数据 home：$arg（给版本名/序号，或数据目录路径）" ;; esac
+  entry_field "$e" 4
+}
+settings_keys() {  # <文件> → 顶层键（每行一个）
+  [ -f "$1" ] && grep -E '^[A-Za-z0-9_.-]+:' "$1" 2>/dev/null | sed -E 's/^([A-Za-z0-9_.-]+):.*/\1/' || true
+}
+settings_sha8() { [ -f "$1" ] && sha256sum "$1" 2>/dev/null | cut -c1-8 || true; }
+settings_block() {  # <文件> <顶层键> → 该键及其后续行（到下一个顶层键为止）
+  awk -v k="$2" '
+    /^[A-Za-z0-9_.-]+:/ { cur=$0; sub(/:.*/,"",cur); if (cur==k) { print; p=1; next } else { p=0 } }
+    { if (p) print }
+  ' "$1"
+}
+
+settings_register() {  # <数据 home | settings.yaml>：把路径与指纹写进账本（+ 回声 + 流水）
+  local file home k sha d
+  file="$(settings_file_of "$1")"; home="$(dirname "$file")"
+  [ -f "$file" ] || { warn "settings 登记：文件不存在（$file）"; return 0; }
+  k="$(state_key_for_data "$home")"
+  if [ -z "$k" ]; then warn "settings 登记：$home 不在账本里 → 跳过（跑 rdsh state --init）"; return 0; fi
+  sha="$(settings_sha8 "$file")"
+  state_kv_set "$k" settings "$file"
+  state_kv_set "$k" settings_sha "$sha"
+  d="$(state_kv_get "$k" dir)"; [ -n "$d" ] && state_echo_installed "$d"
+  state_journal settings "$k" "登记 $file sha=$sha keys=$(settings_keys "$file" | grep -c . || true)"
+  log "账本已登记 settings：$k ← $file（sha $sha）"
+}
+
+settings_carry() {  # <源 home|文件> <目标 home|文件> [--dry-run]
+  local src dst dry=0
+  src="$(settings_file_of "$1")"; dst="$(settings_file_of "$2")"
+  [ "${3:-}" = "--dry-run" ] && dry=1
+  [ -f "$src" ] || { warn "源没有 settings.yaml：$src（无事可做）"; return 0; }
+  if [ ! -f "$dst" ]; then
+    if [ "$dry" = "1" ]; then printf '  [dry-run] 整份携带 %s → %s（目标还没有 settings.yaml，无法做 schema 对照）\n' "$src" "$dst"; return 0; fi
+    cp -p "$src" "$dst"
+    warn "目标 home 还没有 settings.yaml → 无法做 schema 对照，已**整份**携带；首次启动后请核对"
+    settings_register "$dst"
+    return 0
+  fi
+  # 两份都在 → schema 感知合并：同名键取**源**的值（用户的选择）；只在目标里的键（新 schema 自己的）保留；
+  # 只在源里的键（新版本没声明）也带上，但放在带标记的附带块里并告警。
+  # 注意：`local -a x` 只是声明；`set -u` 下 ${#x[@]} 仍会报"未绑定变量" → 必须显式初始化
+  local -a okeys=() nkeys=() shared=() only_src=() only_dst=()
+  mapfile -t okeys < <(settings_keys "$src")
+  mapfile -t nkeys < <(settings_keys "$dst")
+  local k
+  for k in "${okeys[@]}"; do [ -n "$k" ] || continue
+    if printf '%s\n' "${nkeys[@]}" | grep -qxF "$k"; then shared+=("$k"); else only_src+=("$k"); fi
+  done
+  for k in "${nkeys[@]}"; do [ -n "$k" ] || continue
+    printf '%s\n' "${okeys[@]}" | grep -qxF "$k" || only_dst+=("$k")
+  done
+  log "settings 携带：共有键 ${#shared[@]} 个（取源值）/ 目标独有 ${#only_dst[@]} 个（保留 = 新 schema）/ 源独有 ${#only_src[@]} 个（附带并告警）"
+  if [ "${#only_src[@]}" -gt 0 ]; then
+    warn "源独有的键（新版本可能不认识，已附带但可能被忽略）：${only_src[*]}"
+  fi
+  if [ "$dry" = "1" ]; then
+    printf '  [dry-run] 将写 %s（旧文件先挪进回收站）\n' "$dst"
+    for k in "${shared[@]}"; do
+      local ob nb; ob="$(settings_block "$src" "$k")"; nb="$(settings_block "$dst" "$k")"
+      [ "$ob" = "$nb" ] && continue
+      if [ "$(printf '%s\n' "$ob" | grep -c .)" = "1" ] && [ "$(printf '%s\n' "$nb" | grep -c .)" = "1" ]; then
+        printf '    ~ %s: %s → %s\n' "$k" "${nb#*: }" "${ob#*: }"
+      else
+        printf '    ~ %s: 内容不同（%s 行 → %s 行）\n' "$k" "$(printf '%s\n' "$nb" | grep -c .)" "$(printf '%s\n' "$ob" | grep -c .)"
+      fi
+    done
+    return 0
+  fi
+  local tmp="$dst.rdsh-carry.$$"
+  : > "$tmp"
+  # 目标的前导注释（第一个顶层键之前的内容）
+  awk '/^[A-Za-z0-9_.-]+:/{exit} {print}' "$dst" >> "$tmp"
+  for k in "${nkeys[@]}"; do
+    [ -n "$k" ] || continue
+    if printf '%s\n' "${shared[@]}" | grep -qxF "$k"; then settings_block "$src" "$k" >> "$tmp"; else settings_block "$dst" "$k" >> "$tmp"; fi
+  done
+  if [ "${#only_src[@]}" -gt 0 ]; then
+    ( umask 022
+      printf '\n# --- rdsh 携带自其他版本：以下键在目标版本的 settings.yaml 里没有声明（可能被忽略）---\n' >> "$tmp" )
+    for k in "${only_src[@]}"; do settings_block "$src" "$k" >> "$tmp"; done
+  fi
+  trash_mv --label "settings-carry-$(basename "$(dirname "$dst")")" --reason "settings 携带前的旧文件" "$dst" >/dev/null 2>&1 || true
+  mv -f "$tmp" "$dst"
+  settings_register "$dst"
+  log "settings 携带完成：$dst（sha $(settings_sha8 "$dst")）"
+}
+
+cmd_settings() {
+  local sub="${1:-show}"; [ $# -gt 0 ] && shift
+  case "$sub" in
+    show|ls|list)
+      local arg="${1:-}" k home file sha reg nk
+      log "settings.yaml 一览（每版本一份真文件；顶层键随 schema 变，所以不做稳定根软链）"
+      local -a keys_sel=()
+      if [ -n "$arg" ]; then
+        local e; e="$(resolve_target "$arg" 2>/dev/null || true)"
+        case "$e" in UNMANAGED:*|"") die "找不到对象：$arg" ;; esac
+        keys_sel=("$(entry_key "$e")")
+      else
+        mapfile -t keys_sel < <(state_keys)
+      fi
+      for k in "${keys_sel[@]}"; do
+        [ -n "$k" ] || continue
+        home="$(state_kv_get "$k" data)"; file="$(settings_file_of "${home:-/nonexistent}")"
+        reg="$(state_kv_get "$k" settings_sha)"
+        if [ -f "$file" ]; then
+          sha="$(settings_sha8 "$file")"; nk="$(settings_keys "$file" | grep -c . || true)"
+          printf '  %-18s %s\n' "$k" "$file"
+          printf '      %s 字节  顶层键 %s 个  sha %s%s\n' "$(stat -c %s "$file")" "${nk:-0}" "$sha" \
+            "$([ -n "$reg" ] && { [ "$reg" = "$sha" ] && printf '  [与账本一致]' || printf '  [⚠️ 与账本不符：账本记 %s]' "$reg"; })"
+          printf '      键：%s\n' "$(settings_keys "$file" | tr '\n' ' ')"
+        else
+          printf '  %-18s %s（不存在）%s\n' "$k" "$file" "$([ -n "$reg" ] && printf '  [账本记 sha %s]' "$reg")"
+        fi
+      done
+      ;;
+    keys)
+      local h; h="$(settings_home_of "${1:?用法: rdsh settings keys <版本|目录>}")"
+      settings_keys "$(settings_file_of "$h")" | sed 's/^/  /'
+      ;;
+    carry)
+      local s1="${1:-}" s2="${2:-}" dr=0
+      [ -n "$s1" ] && [ -n "$s2" ] || die '用法: rdsh settings carry <源版本|目录> <目标版本|目录> [--dry-run]'
+      [ "${3:-}" = "--dry-run" ] && dr=1
+      settings_carry "$(settings_home_of "$s1")" "$(settings_home_of "$s2")" $([ "$dr" = 1 ] && printf -- '--dry-run')
+      ;;
+    register)
+      settings_register "$(settings_home_of "${1:?用法: rdsh settings register <版本|目录>}")"
+      ;;
+    -h|--help|help)
+      cat <<'USAGE'
+rdsh settings —— settings.yaml 的查看 / 携带 / 登记
+
+用法:
+  rdsh settings show [<目标>]                各对象的 settings 路径 / 顶层键 / 指纹（与账本是否一致）
+  rdsh settings keys <目标>                  只看顶层键（判断 schema 差异用）
+  rdsh settings carry <源> <目标> [--dry-run]  **schema 感知**携带：
+                                             同名键取源值（用户的选择）、目标独有键保留（新 schema）、
+                                             源独有键附带并告警；旧文件先进回收站
+  rdsh settings register <目标>              把路径与 sha 指纹登记进账本（含回声与流水）
+
+为什么不做稳定根软链：顶层键随版本 schema 变（实测 0.1.3 有 8 键、0.1.6 有 12 键），
+共享一份会让新版本读到不认识的键、旧版本读到缺失的键。所以每版本一份真文件 + 显式携带 + 账本登记。
+USAGE
+      ;;
+    *) die '用法: rdsh settings [show|keys|carry|register]（--help 看用法）' ;;
+  esac
+}
+
 # ---------------- retire：退役一个版本（安全地收走全部足迹） ----------------
 # 一个版本有**五类足迹**，漏一类就是 2026-09-19 那种断链事故（21 条绝对软链断 → 插件全 failed to import）：
 #   ① 检出目录        ② 数据 home
@@ -3602,7 +3798,7 @@ main() {
   case "$cmd" in
     base|fetch|help|-h|--help|doctor|scan|secrets ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
-    restore|retire ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    restore|retire|settings|setting ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -3623,6 +3819,7 @@ main() {
     trash|trashcan ) shift; cmd_trash "$@" ;;
     restore ) shift; cmd_restore "$@" ;;
     retire ) shift; cmd_retire "$@" ;;
+    settings|setting ) shift; cmd_settings "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     scan|secrets ) shift; exec "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;  # 转发到隐私守卫

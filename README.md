@@ -37,6 +37,7 @@
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]` | **衍生物账本**：回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 注册表陈旧 / 启动日志的体积与份数。**默认只列不删**；`--purge` 才是真删（备份类必须给 `--older-than`；回收项小于 `RDSH_TRASH_KEEP_DAYS`（默认 7 天）要 `--force`） |
 | `rdsh trash ls / restore <条目名\|--last> [--force]` | **回收站**（"永不 rm"的落点）：每个条目自带清单（原路径 / 体积 / 原因 / 逐项还原命令 / 跨设备标记）。`restore` 目标已存在则跳过不覆盖，`--force` 才腾位 |
+| `rdsh settings show\|keys\|carry\|register` | **settings.yaml 的查看 / 携带 / 登记**：`carry` 是 **schema 感知**合并（同名键取源值、目标独有键保留、源独有键附带并告警），旧文件先进回收站；登记会写路径 + sha 指纹进账本 |
 | `rdsh retire [<目标…>] [--plan\|--apply] [--force]` | **退役**：把五类足迹（检出 / 数据 home / home 内插件链 / **指向它们的**外部软链** / 日志+注册表+`.map`+账本）逐项清点后**整体挪进同一个回收条目**（可整体还原）。**默认只出计划**；在跑的拒绝；回退基线或最后一版可启动版本要 `--force` 并当场写明后果 |
 | `rdsh scan --path <目录> \| --staged \| --files <文件>…` | **隐私守卫**：扫私钥 / 令牌 / 凭据文件 / 会话数据（error）与绝对家目录 / 邮箱 / 大文件（warn）。**报告不回显敏感值**；必报"扫了几个文件"，0 个报 error；退出码 0/1/2（`--strict` 把 warn 提级）。`tools/publish.sh --stage` 与「我的 dsh」的 `backup.sh --commit` 都会先过它 |
 | `rdsh doctor [--only <维度,…>] [--json] [--quiet]` | **一键只读体检**（九个维度：检出 / 数据 home / 软链完整性 / 插件一致性 / 状态账本 / 实例 / 日志 / 磁盘内存 / 配置）。**必报"检查了几个对象"，总数为 0 时报 error**；退出码 `0` 无发现 / `1` 有 warn / `2` 有 error —— restore / retire / migrate 共用它 |
@@ -146,6 +147,14 @@ rdsh start
 
 > `.installed` 写在检出里，所以 `rdsh` 会把它加进 `.git/info/exclude`（本地生效、不进上游）——否则它会污染 `git status`，动摇补丁工具的"干净树"前提。
 
+### settings.yaml（每版本一份，0.6.0 起）
+
+顶层键数**随版本变**（实测 `0.1.3-alpha.2` 有 8 个、`0.1.6-alpha.1` 有 12 个），所以**不**做稳定根软链 —— 共享一份会让新版本读到不认识的键、旧版本读到缺失的键。做法是：
+
+- 每版本一份真文件；
+- 迁移时 `rdsh settings carry` **schema 感知**合并：**同名键取源值**（你的选择被带走）/ **目标独有键保留**（新 schema 自己的）/ **源独有键附带并告警**（新版本可能不认）；旧文件先进回收站（可还原）；
+- 账本登记 **路径 + sha 指纹**，`rdsh settings show` 能一眼看出"与账本一致"还是被改过。
+
 ### 同版本共存（`-2` 次号，0.5.3 起）
 
 同一台机上**可以并存同版本的多个检出**（`fetch` 默认目录名撞车时会自动加次号）。规则：
@@ -178,7 +187,7 @@ rdsh start
 - `plugin-sync` 的方向判断基于 **mtime**，是近似值（`cp -a` 会保留时间、手改会刷新）；更稳的「构建记录」尚未实现。
 - 插件权威副本「谁最新」目前由人（或 `--adopt`）决定，**没有自动构建流水线**。
 - `rdsh fetch` 依赖 GitHub；网络不畅时可能失败（`--list` 有 10 分钟磁盘缓存与 `git ls-remote` 回退）。
-- `settings.yaml` 目前是每版本一份的实文件，**跨版本升级会丢插件开关与配置**（见路线图）。
+- `settings.yaml` 是**每版本一份真文件**（顶层键随 schema 变，故不做稳定根软链）；跨版本用 `rdsh settings carry` **schema 感知携带**（`migrate.sh` 第 4.5 步自动调用），并在账本里登记路径与 sha 指纹（`rdsh settings show` 能看出漂移）。
 - 没有功能级测试套件；CI 做 `bash -n`、干净 HOME 下的 `--help` 冒烟、可移植性冒烟，外加 **shellcheck（error 级阻塞、warning 级咨询）**。已知 warning 族见 `docs/路线图.md`。
 - 本仓库脚本为**内部实测版整理而来**，非从零设计的通用软件。
 
