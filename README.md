@@ -37,6 +37,7 @@
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]` | **衍生物账本**：回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 注册表陈旧 / 启动日志的体积与份数。**默认只列不删**；`--purge` 才是真删（备份类必须给 `--older-than`；回收项小于 `RDSH_TRASH_KEEP_DAYS`（默认 7 天）要 `--force`） |
 | `rdsh trash ls / restore <条目名\|--last> [--force]` | **回收站**（"永不 rm"的落点）：每个条目自带清单（原路径 / 体积 / 原因 / 逐项还原命令 / 跨设备标记）。`restore` 目标已存在则跳过不覆盖，`--force` 才腾位 |
+| `rdsh retire [<目标…>] [--plan\|--apply] [--force]` | **退役**：把五类足迹（检出 / 数据 home / home 内插件链 / **指向它们的**外部软链** / 日志+注册表+`.map`+账本）逐项清点后**整体挪进同一个回收条目**（可整体还原）。**默认只出计划**；在跑的拒绝；回退基线或最后一版可启动版本要 `--force` 并当场写明后果 |
 | `rdsh scan --path <目录> \| --staged \| --files <文件>…` | **隐私守卫**：扫私钥 / 令牌 / 凭据文件 / 会话数据（error）与绝对家目录 / 邮箱 / 大文件（warn）。**报告不回显敏感值**；必报"扫了几个文件"，0 个报 error；退出码 0/1/2（`--strict` 把 warn 提级）。`tools/publish.sh --stage` 与「我的 dsh」的 `backup.sh --commit` 都会先过它 |
 | `rdsh doctor [--only <维度,…>] [--json] [--quiet]` | **一键只读体检**（九个维度：检出 / 数据 home / 软链完整性 / 插件一致性 / 状态账本 / 实例 / 日志 / 磁盘内存 / 配置）。**必报"检查了几个对象"，总数为 0 时报 error**；退出码 `0` 无发现 / `1` 有 warn / `2` 有 error —— restore / retire / migrate 共用它 |
 | `rdsh state [list\|show\|role\|render\|sync\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |

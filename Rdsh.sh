@@ -82,6 +82,11 @@
 #                                         #   插件一致性/状态账本/实例/日志/磁盘内存/配置 九个维度；
 #                                         #   必报"检查了几个对象"，总数为 0 时报 error；
 #                                         #   退出码 0=无发现 1=有 warn 2=有 error（restore/retire/migrate 共用它）
+#   rdsh retire [<目标…>] [--plan|--apply] [--force]
+#                                         # **退役**：把五类足迹（检出/数据 home/home 内插件链/
+#                                         #   指向它们的**外部软链**/日志+注册表+.map+账本）逐项清点后
+#                                         #   **整体挪进同一个回收条目**（可整体还原）。默认只出计划；
+#                                         #   在跑的不许退役；回退基线或最后一版可用版本要 --force 并写明后果
 #   rdsh scan --path <目录> | --staged [--repo <目录>] | --files <文件>...
 #                                         # **隐私守卫**（转发 scan-secrets.sh）：扫私钥/令牌/凭据文件/
 #                                         #   会话数据（error）与绝对家目录/邮箱/大文件（warn）；
@@ -2052,7 +2057,7 @@ state_echo_installed() {  # <检出目录>：把账本回写成 .installed（KEY
   local dir="$1" key; [ -n "$dir" ] || return 0
   key="$(state_key_for_dir "$dir")"
   [ -n "$key" ] || return 0
-  local n; n="$(grep -c '' "$STATE_JOURNAL" 2>/dev/null || echo 0)"
+  local n; n="$(grep -c '' "$STATE_JOURNAL" 2>/dev/null || true)"; n="${n:-0}"
   ( umask 022
     { printf '# rdsh —— 检出状态回声；权威是 %s（可由 rdsh state render 重建）\n' "$STATE_KV"
       printf 'key=%s\n'            "$key"
@@ -2763,12 +2768,13 @@ cmd_trash() {
         orig="$(sed -nE "s/^orig\\.$i=(.*)$/\\1/p" "$mf" | tail -1)"
         dest="$(sed -nE "s/^dest\\.$i=(.*)$/\\1/p" "$mf" | tail -1)"
         [ -n "$orig" ] || break
-        if [ -e "$orig" ] && [ "$force" != "1" ]; then
+        # 注意用 -e **或 -L**：软链（尤其断链）的 -e 为假 —— 退役场景里被收走的正是这种链
+        if { [ -e "$orig" ] || [ -L "$orig" ]; } && [ "$force" != "1" ]; then
           warn "目标已存在，跳过（不覆盖；要覆盖加 --force）：$orig"; skipped=$((skipped+1)); i=$((i+1)); continue
         fi
-        if [ -e "$dest" ]; then
+        if [ -e "$dest" ] || [ -L "$dest" ]; then
           mkdir -p "$(dirname "$orig")"
-          [ "$force" = "1" ] && [ -e "$orig" ] && rdsh_trash_quiet "$orig"
+          if [ "$force" = "1" ] && { [ -e "$orig" ] || [ -L "$orig" ]; }; then rdsh_trash_quiet "$orig"; fi
           if mv "$dest" "$orig"; then log "  已还原：$orig"; moved=$((moved+1)); else warn "  还原失败：$orig"; fi
         fi
         i=$((i+1))
@@ -3094,6 +3100,212 @@ cmd_restore() {
   return 0
 }
 
+# ---------------- retire：退役一个版本（安全地收走全部足迹） ----------------
+# 一个版本有**五类足迹**，漏一类就是 2026-09-19 那种断链事故（21 条绝对软链断 → 插件全 failed to import）：
+#   ① 检出目录        ② 数据 home
+#   ③ home 内的插件软链（profiles/node_modules/@deepseek-ai/*）—— 随 home 走，但要确认没链出去
+#   ④ 指向①②的**外部软链**（别的 home 的插件链、~/.local/bin 等）—— 必须一起收走，否则留下断链
+#   ⑤ 日志 / 实例注册表 / .map 行 / 账本角色
+# 纪律：默认**只出计划**；`--apply` 才动；在跑的不许退役；是回退基线或最后一版可用版本要 `--force`
+#       并当场写明后果；①②④ **整体挪进同一个回收条目**（清单里带逐项还原命令）。
+map_drop_for() {  # <检出目录名> <检出目录> <数据目录>：删掉 .map 里指向它的行
+  [ -f "$MAP_FILE" ] || return 0
+  local base="$1" dir="$2" data="$3" tmp="$MAP_FILE.tmp.$$" n m
+  n="$(grep -c . "$MAP_FILE" 2>/dev/null || true)"; n="${n:-0}"
+  awk -F'|' -v b="$base" -v d="$dir" -v h="$data" '
+    /^[[:space:]]*$/ { next }
+    {
+      if ($1=="dir" && $2==b) next
+      if ($1=="ext" && ($2==d || $3==h)) next
+      if (h!="" && $3==h) next
+      print
+    }' "$MAP_FILE" > "$tmp" 2>/dev/null || : > "$tmp"
+  mv -f "$tmp" "$MAP_FILE"
+  m="$(grep -c . "$MAP_FILE" 2>/dev/null || true)"; m="${m:-0}"
+  [ "$n" != "$m" ] && log "  .map：删掉 $((n-m)) 行（$n → $m）" >&2
+  return 0
+}
+
+retire_live_ports() {  # <检出目录> <数据目录> → 正在用它们的实例端口
+  local want_dir="$1" want_data="$2" rows p _pid _ver d data _k _i _u _s out=""
+  rows="$(instances_live)"
+  while IFS='|' read -r p _pid _ver d data _k _i _u _s; do
+    [ -n "$p" ] || continue
+    if { [ -n "$want_dir" ] && [ "$(readlink -f "$d" 2>/dev/null)" = "$(readlink -f "$want_dir" 2>/dev/null)" ]; } \
+    || { [ -n "$want_data" ] && [ "$(readlink -f "$data" 2>/dev/null)" = "$(readlink -f "$want_data" 2>/dev/null)" ]; }; then
+      out="$out $p"
+    fi
+  done <<< "$rows"
+  printf '%s' "${out# }"
+}
+
+retire_external_links() {  # <检出目录> <数据目录> → 指向它们的**外部**软链，每行一条
+  # 扫描范围明说（不做全盘扫）：数据根 / 实例注册表 / 稳定根 / ~/.local/bin —— 已知会放绝对软链的地方
+  local dir="$1" data="$2" root l t
+  for root in "$DATA_ROOT" "$RUN_DIR" "$SHARED_ROOT" "$HOME/.local/bin"; do
+    [ -d "$root" ] || continue
+    while IFS= read -r l; do
+      [ -n "$l" ] || continue
+      # 落在①②**内部**的链是第③类（随 home/检出一起走），不算外部引用 —— 否则清单会说谎
+      case "$l" in "$dir"|"$dir"/*|"$data"|"$data"/*) continue ;; esac
+      t="$(readlink "$l" 2>/dev/null || true)"
+      case "$t" in
+        "$dir"|"$dir"/*|"$data"|"$data"/*) printf '%s\n' "$l" ;;
+      esac
+    done < <(find "$root" -type l 2>/dev/null || true)
+  done
+  return 0
+}
+
+# retire_plan_one 用这组全局返回，避免临时文件（也避免 rm）
+RET_VER=""; RET_KEY=""; RET_DIR=""; RET_DATA=""; RET_ROLE=""; RET_PORTS=""; RET_NL=0
+retire_plan_one() {  # <条目>：打印足迹清单，并把关键字段放进 RET_*
+  local e="$1"
+  RET_VER="$(entry_field "$e" 1)"
+  RET_DIR="$(readlink -f "$(entry_field "$e" 2)")"
+  RET_DATA="$(readlink -f "$(entry_field "$e" 4)")"
+  RET_KEY="$(entry_key "$e")"
+  RET_ROLE="$(state_role_of "$RET_KEY")"
+  printf '  版本 %-16s 角色 %-16s\n' "$RET_VER" "$RET_ROLE"
+  printf '    ① 检出 : %-58s %s\n' "$RET_DIR" "$(du_size "$RET_DIR")"
+  printf '    ② 数据 : %-58s %s\n' "$RET_DATA" "$(du_size "$RET_DATA")"
+  RET_PORTS="$(retire_live_ports "$RET_DIR" "$RET_DATA")"
+  printf '    运行中 : %s\n' "${RET_PORTS:-无}"
+  local links; links="$(retire_external_links "$RET_DIR" "$RET_DATA")"
+  RET_NL=0; [ -n "$links" ] && RET_NL="$(printf '%s\n' "$links" | grep -c .)"
+  printf '    ④ 外部软链 %s 条（范围：数据根/注册表/稳定根/~/.local/bin）\n' "$RET_NL"
+  [ "$RET_NL" -gt 0 ] && printf '%s\n' "$links" | sed -n '1,6p' | sed 's/^/        /'
+  [ "$RET_NL" -gt 6 ] && printf '        …（共 %s 条，退役时会一并收进回收条目）\n' "$RET_NL"
+  local nlog nmap
+  nlog="$(du_count "$LOG_DIR"/web-"$RET_VER"-*.log "$LOG_DIR"/web-"$RET_VER".log)"
+  printf '    ⑤ 日志 : %s 个（保留 —— 体积小且是历史证据；要清用 rdsh logs --clean）\n' "$nlog"
+  nmap=0
+  [ -f "$MAP_FILE" ] && nmap="$(awk -F'|' -v b="$(basename "$RET_DIR")" -v h="$RET_DATA" '($2==b)||(h!=""&&$3==h)' "$MAP_FILE" 2>/dev/null | grep -c . || true)"
+  printf '       .map : %s 行指向它（退役时删掉）\n' "${nmap:-0}"
+  printf '       账本 : 角色置 retired + 流水留墓碑；插件链随 home 一起挪走\n'
+  RET_LINKS="$links"
+}
+RET_LINKS=""
+
+retire_usable_count() {  # <要退役的键> → 除它之外还剩几个**可启动**的版本
+  # 判据：角色不是 retired（baseline / retire-candidate 都还能 rdsh start），且检出目录仍在
+  local skip="$1" k role d n=0
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    [ "$k" = "$skip" ] && continue
+    role="$(state_role_of "$k")"
+    [ "$role" = "retired" ] && continue
+    d="$(state_kv_get "$k" dir)"
+    [ -n "$d" ] && [ ! -d "$d" ] && continue
+    n=$((n+1))
+  done < <(state_keys)
+  printf '%s' "$n"
+}
+
+cmd_retire() {
+  local apply=0 plan_only=1 force=0 a
+  local -a targets=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --plan|--dry-run|-n) plan_only=1 ;;
+      --apply|--yes|-y) apply=1; plan_only=0 ;;
+      --force) force=1 ;;
+      -*) die "未知选项：$a（rdsh retire <目标…> [--plan|--apply] [--force]）" ;;
+      *) targets+=("$a") ;;
+    esac
+    shift || true
+  done
+
+  if [ "${#targets[@]}" -eq 0 ]; then
+    log '退役候选（账本里 role=retire-candidate 的对象）'
+    local k n=0
+    while IFS= read -r k; do
+      [ -n "$k" ] || continue
+      [ "$(state_role_of "$k")" = "retire-candidate" ] || continue
+      n=$((n+1)); printf '  %-18s %-8s %s\n' "$k" "$(du_size "$(state_kv_get "$k" dir)")" "$(state_kv_get "$k" dir)"
+    done < <(state_keys)
+    [ "$n" = "0" ] && printf '  （没有。先把某版本标上：rdsh state role <对象> retire-candidate）\n'
+    printf '\n  退役任意版本：rdsh retire <目标…> [--plan|--apply]\n'
+    return 0
+  fi
+
+  local t entry key ver dir data role failed=0
+  for t in "${targets[@]}"; do
+    entry="$(resolve_target "$t")"
+    [[ "$entry" == UNMANAGED:* ]] && die "未纳入管理的路径不能退役：${entry#UNMANAGED:}（先用 rdsh add 纳入，或手工处理）"
+    echo
+    log "退役评估：$(entry_key "$entry")"
+    retire_plan_one "$entry"
+    key="$RET_KEY"; ver="$RET_VER"; dir="$RET_DIR"; data="$RET_DATA"; role="$RET_ROLE"
+
+    if [ -n "$RET_PORTS" ]; then
+      warn "已在运行（端口 $RET_PORTS）→ **拒绝退役**。先停：rdsh stop --port $(printf '%s' "$RET_PORTS" | awk '{print $1}')"
+      failed=$((failed+1)); continue
+    fi
+    if [ "$role" = "baseline" ] && [ "$force" != "1" ]; then
+      warn '它是**回退基线** → 拒绝（要退役请 --force，并接受这条后果）：'
+      warn '  后果：回退只能靠「rdsh fetch 重下代码 + rdsh restore 从本地快照恢复数据」；账本里的基线角色将置 retired'
+      failed=$((failed+1)); continue
+    fi
+    local usable; usable="$(retire_usable_count "$key")"
+    if [ "$usable" = "0" ] && [ "$force" != "1" ]; then
+      warn '退役后**没有别的可用版本**了 → 拒绝（要退役请 --force）'
+      failed=$((failed+1)); continue
+    fi
+    if [ "$plan_only" = "1" ]; then
+      log "计划（未执行）：①②④ 整体挪进回收站（同一个条目，可整体还原）"
+      log "  收尾：账本角色 → retired（留墓碑）、.map 删掉指向它的行、注册表陈旧条目退休、doctor 扫断链"
+      log "  执行：rdsh retire $t --apply$([ "$force" = "1" ] && printf ' --force')"
+      continue
+    fi
+
+    local -a srcs=()
+    [ -d "$dir" ] && srcs+=("$dir")
+    if [ -d "$data" ] && [ "$(readlink -f "$data")" != "$(readlink -f "$dir")" ]; then srcs+=("$data"); fi
+    if [ -n "$RET_LINKS" ]; then
+      while IFS= read -r l; do [ -n "$l" ] && srcs+=("$l"); done <<< "$RET_LINKS"
+    fi
+    if [ "${#srcs[@]}" -eq 0 ]; then warn '没有可挪走的足迹'; failed=$((failed+1)); continue; fi
+    local why="退役 $key（角色 $role）"
+    [ "$role" = "baseline" ] && why="退役回退基线 $key（--force 放行）"
+    [ "$force" = "1" ] && [ "$role" != "baseline" ] && why="退役 $key（--force）"
+    if ! trash_mv --label "retire-$key" --reason "$why" "${srcs[@]}"; then
+      warn "回收失败：$key"; failed=$((failed+1)); continue
+    fi
+    local entry_dir="${TRASH_LAST_DEST:-}"
+    log "  已挪进回收站：$entry_dir（${#srcs[@]} 项，清单里有逐项还原命令）"
+
+    map_drop_for "$(basename "$dir")" "$dir" "$data"
+    local p rdir rdata
+    for p in $(registry_ports); do
+      rdir="$(registry_get "$p" dir)"; rdata="$(registry_get "$p" data)"
+      if { [ -n "$rdir" ] && [ "$rdir" = "$dir" ]; } || { [ -n "$rdata" ] && [ "$rdata" = "$data" ]; }; then
+        registry_retire "$p"; log "  注册表：端口 $p 的注解已退休到 run/stale/"
+      fi
+    done
+    if state_kv_has "$key"; then
+      state_kv_set "$key" role retired
+      state_kv_set "$key" role_set_at "$(date -Is)"
+      state_journal retire "$key" "why=$why；足迹已挪进 ${entry_dir:-回收站}；检出=$dir 数据=$data 外部链=$RET_NL"
+      log "  账本：$key → retired（墓碑见 rdsh state show $key）"
+    fi
+    state_render_baseline || true
+    log "  完成。整体还原：rdsh trash restore $(basename "${entry_dir:-}")"
+  done
+
+  if [ "$apply" = "1" ]; then
+    echo
+    log '收尾验证：断链扫描（doctor --only links）'
+    if [ -f "$MANAGE_ROOT/doctor.sh" ]; then
+      bash "$MANAGE_ROOT/doctor.sh" --only links 2>&1 | tail -6 || warn 'doctor 报错 → 手工跑 rdsh doctor'
+    else
+      warn '没有 doctor.sh，跳过'
+    fi
+  fi
+  [ "$failed" = "0" ] || { warn "$failed 个目标未退役"; return 1; }
+}
+
 remote_tags_git() {  # git 协议列举（备选；某些网络对 git over HTTPS 不友好）
   command -v git >/dev/null || return 1
   timeout "${RDSH_FETCH_TIMEOUT:-60}" git ls-remote --tags --refs "$REMOTE_URL" 2>/tmp/rdsh-ls-remote.err \
@@ -3241,7 +3453,7 @@ main() {
   case "$cmd" in
     base|fetch|help|-h|--help|doctor|scan|secrets ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
-    restore ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    restore|retire ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -3261,6 +3473,7 @@ main() {
     du ) shift; cmd_du "$@" ;;
     trash|trashcan ) shift; cmd_trash "$@" ;;
     restore ) shift; cmd_restore "$@" ;;
+    retire ) shift; cmd_retire "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     scan|secrets ) shift; exec "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;  # 转发到隐私守卫
