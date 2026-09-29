@@ -27,3 +27,6 @@ BASE=~/Mapp
 # RDSH_REMOTE=https://github.com/deepseek-ai/deepseek-harness.git
 # RDSH_TAG_PREFIX=dsh-v           # 远端 tag 命名：dsh-v<版本>
 # RDSH_AUTO_INSTALL=1             # 启动时缺依赖自动 pnpm install
+# RDSH_MYDSH_REPO=~/workspace/my-dsh  # 「我的 dsh」本地克隆；rdsh restore 不写 --from 时用它
+# PATCHES=~/Mapp/.dsh-suite/patches   # 补丁仓（与 patch-manager.sh 同默认）
+# PLUGIN_ROOT=~/Mapp/.dsh-suite/plugins  # 插件权威副本

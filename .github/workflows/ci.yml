@@ -57,6 +57,11 @@ jobs:
           set -e
           bash tools/smoke-du.sh ./Rdsh.sh
 
+      - name: 功能冒烟（隔离 BASE：backup 增量快照 + restore）
+        run: |
+          set -e
+          bash tools/smoke-backup-restore.sh ./Rdsh.sh
+
   shellcheck:
     name: shellcheck（error 级阻塞，warning 级咨询）
     runs-on: ubuntu-latest

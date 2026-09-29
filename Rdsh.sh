@@ -54,7 +54,14 @@
 #   rdsh debug env <id>                   # 打印可 eval 的 DSH_HOME/cd（排障用）
 #   rdsh exec <版本|debug-id> -- <命令>    # 在指定环境里跑一次性命令
 #   rdsh data [-o] [版本|序号|项目名|路径] # 显示 / 打开数据目录
-#   rdsh backup [版本|序号]               # 备份数据目录到 $BASE/.dsh-backup/
+#   rdsh backup [<目标>|--all] [--snapshot|--full] [--state] [--verify] [--keep N]
+#       rdsh backup --list [<版本>] | --verify <快照目录>
+#                                         # 数据 home / 状态账本的**本地**快照。--snapshot 用
+#                                         #   rsync --link-dest 做增量（未变的文件是硬链接）；
+#                                         #   --verify 逐文件核查；--keep N 保留策略（超出的进回收站）
+#   rdsh restore --list | --type <类> [--from <源>] [--file <相对路径>] [--diff] [--merge]
+#                                         # 从本地快照 / 本地克隆 / 远端仓库恢复；data/state **只本地**；
+#                                         #   凭据默认不恢复；记忆三库默认按条目追加；收尾自动调 doctor
 #   rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]
 #                                         # rdsh 衍生物账本：回收站/备份快照/调试沙箱/fetch 临时/
 #                                         #   注册表陈旧/启动日志的体积与份数。**默认只列不删**；
@@ -132,6 +139,9 @@ _run="$(expand "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")"
 _dbg="$(expand "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"
 _state="$(expand "${RDSH_STATE_ROOT:-$(cfg_get STATE_ROOT)}")"
 _trash="$(expand "${RDSH_TRASH:-$(cfg_get TRASH_ROOT)}")"
+_patches="$(expand "${RDSH_PATCHES:-$(cfg_get PATCHES)}")"
+_mydsh="$(expand "${RDSH_MYDSH_REPO:-$(cfg_get MYDSH_REPO)}")"
+_plugin="$(expand "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/dsh}"
 # 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
@@ -167,6 +177,11 @@ BASELINE_MD="$BACKUP_ROOT/回退基线.md"     # 人读视图：由上面三者�
 TRASH_ROOT="${_trash:-$BASE/.dsh-suite/trash}"
 TRASH_INDEX="$TRASH_ROOT/index.log"        # 只追加的回收流水
 TRASH_KEEP_DAYS="${RDSH_TRASH_KEEP_DAYS:-7}" # 小于这个天数的回收项，purge 需要 --force
+PATCHES_ROOT="${_patches:-$BASE/dsh-patches}"   # 补丁仓（与 patch-manager.sh 同默认）
+PLUGIN_ROOT="${_plugin:-$BASE/dsh-plugins}"      # 插件权威副本（与 plugin-sync.sh 同默认）
+SNAP_ROOT="$BACKUP_ROOT/snapshots"               # 增量快照根（每版本一目录，内含各时间戳快照）
+STATE_SNAP_ROOT="$BACKUP_ROOT/state-snapshots"   # 状态账本的本地快照（按用户裁定：state 只本地备份，不进仓）
+MYDSH_REPO="${_mydsh:-}"                         # 「我的 dsh」本地克隆路径（restore --from 可省）
 # 调用期覆盖（由 --debug <id> 设置）：让 launch_* 用调试环境的 home / 登记 kind=debug
 ENTRY_HOME_OVERRIDE=""
 INSTANCE_KIND="real"
@@ -1559,18 +1574,243 @@ cmd_data() {
   fi
 }
 
+# ---------------- backup：数据 home 与状态账本 的**本地**快照 ----------------
+# 为什么是本地：会话数据（sessions/storages/workspace.json）不进任何仓库（隐私），
+# 恢复只从本地指定目录读。state 账本同理（用户 2026-09-29 裁定）。
+# 两种模式：
+#   --full（默认，兼容旧行为）  cp -a 全量
+#   --snapshot                 rsync -a --link-dest=<上一份> → 未变化的文件是**硬链接**，
+#                              只存变化，GB 级数据天天跑才可持续
+# 布局：$BACKUP_ROOT/snapshots/<版本>/<时间戳>/{MANIFEST.kv, 文件…}
+#       $BACKUP_ROOT/state-snapshots/<时间戳>/{MANIFEST.kv, 账本…}
+backup_stamp() { date +%Y%m%d-%H%M%S; }
+snap_dir_of()  { printf '%s/%s' "$SNAP_ROOT" "$1"; }
+snap_latest()  { ls -1dt "$(snap_dir_of "$1")"/*/ 2>/dev/null | sed -n '1p' || true; }
+snap_count()   { du_count "$(snap_dir_of "$1")"/*/; }
+snap_files()   { [ -d "$1" ] || { printf '0'; return 0; }; find "$1" -mindepth 1 -type f ! -name MANIFEST.kv 2>/dev/null | wc -l; }
+snap_meta()    { [ -d "$1" ] || return 0; find "$1" -type f -printf '%P\t%s\t%T@\n' 2>/dev/null | sort; }
+
+snap_manifest() {  # <快照目录> <字段> → 值
+  sed -nE "s/^$2=(.*)$/\1/p" "$1/MANIFEST.kv" 2>/dev/null | tail -1
+}
+
+snap_write_manifest() {  # <快照目录> <版本> <源> <模式> [link-dest]
+  local d="$1" ver="$2" src="$3" mode="$4" ld="${5:-}"
+  local n sz
+  n="$(snap_files "$d")"          # snap_files 已排除 MANIFEST.kv（别在这里再减 1）
+  sz="$(du -sh "$d" 2>/dev/null | cut -f1 || echo '?')"
+  ( umask 077
+    { printf 'version=%s\nat=%s\nsource=%s\nmode=%s\nlink_dest=%s\nfiles=%s\nsize=%s\n' \
+        "$ver" "$(date -Is)" "$src" "$mode" "$ld" "$n" "$sz"
+    } > "$d/MANIFEST.kv" )
+}
+
+snap_verify() {  # <快照目录> → 0 一致 / 1 有差异；打印核查了几个文件
+  local d="$1"
+  [ -d "$d" ] || { warn "不是目录：$d"; return 1; }
+  [ -f "$d/MANIFEST.kv" ] || { warn "缺 MANIFEST.kv（不是 rdsh 快照？）：$d"; return 1; }
+  local src mode files_claim
+  src="$(snap_manifest "$d" source)"; mode="$(snap_manifest "$d" mode)"; files_claim="$(snap_manifest "$d" files)"
+  local n_snap; n_snap="$(snap_files "$d")"
+  log "核查快照：$d（模式 ${mode:-?}，源 ${src:-?}）"
+  printf '  快照内文件：%s 个（清单记 %s 个）\n' "$n_snap" "${files_claim:-?}"
+  local bad=0
+  [ "$n_snap" = "${files_claim:-$n_snap}" ] || { warn '文件数与清单不符'; bad=1; }
+  # **内部一致性**（判据的基石）：MANIFEST 是最后写的，快照定稿后不该再有文件比它新。
+  # 这条既能抓"快照被就地改动"，又不会被"源在快照之后正常变化"误伤 ——
+  # 所以不用"快照 vs 源"的差异当失败（那是不可靠的判据，源变了差异自然有）。
+  local touched=""
+  touched="$(find "$d" -type f ! -name MANIFEST.kv -newer "$d/MANIFEST.kv" 2>/dev/null | wc -l)"
+  if [ "${touched:-0}" = "0" ]; then
+    printf '  [ok] %s 个文件都在定稿时间之前（快照未被就地改动）\n' "$n_snap"
+  else
+    warn "$touched 个文件比 MANIFEST 还新 → 快照定稿后被改动过（或源在快照后又在同路径写过）"
+    find "$d" -type f ! -name MANIFEST.kv -newer "$d/MANIFEST.kv" 2>/dev/null | sed -n '1,5p' | sed 's/^/      /'
+    bad=1
+  fi
+  local unreadable; unreadable="$(find "$d" -type f ! -readable 2>/dev/null | wc -l)"
+  [ "${unreadable:-0}" = "0" ] || { warn "$unreadable 个文件不可读"; bad=1; }
+  if [ -d "$src" ]; then
+    # 与源比对只作**参考信息**，不当失败判据
+    local ndiff
+    ndiff="$(diff <(snap_meta "$src") <(snap_meta "$d") 2>/dev/null | grep -c '^[<>]' || true)"
+    printf '  参考：与源逐文件比（体积+mtime）%s 行不同（源在快照后可能正常变过，不代表快照坏了）\n' "${ndiff:-0}"
+  else
+    printf '  源已不在（%s）→ 只做内部一致性核查\n' "${src:-?}"
+  fi
+  return "$bad"
+}
+
+snap_prune() {  # <版本> <保留份数>：超出的挪进回收站（永不 rm）
+  local ver="$1" keep="$2" i=0 d
+  case "$keep" in ''|*[!0-9]*) die "--keep 需要正整数（收到：$keep）" ;; esac
+  [ "$keep" -ge 1 ] || die '--keep 需要 ≥1'
+  local n; n="$(snap_count "$ver")"
+  if [ "$n" -le "$keep" ]; then log "快照 $n 份 ≤ 保留 $keep 份，无需清理"; return 0; fi
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    i=$((i+1))
+    if [ "$i" -gt "$keep" ]; then
+      trash_mv --label "snapshot-$ver-$(basename "$d")" --reason "备份保留策略：--keep $keep" "$d" || warn "挪走失败：$d"
+    fi
+  done < <(ls -1dt "$(snap_dir_of "$ver")"/*/ 2>/dev/null || true)
+  log "保留最新 $keep 份，其余已挪进回收站（rdsh trash ls 可还原）"
+}
+
+backup_one() {  # <版本> <源目录> <模式> [标签] [dry|live] → **stdout 只返回快照路径**
+  local ver="$1" src="$2" mode="$3" label="${4:-}" flag="${5:-live}"
+  local dry=0; [ "$flag" = "dry" ] && dry=1
+  # 注意：本函数的 **stdout 只用于返回快照路径**（会被 $( ) 捕获），
+  # 所有叙述/进度必须走 stderr —— 否则日志会被吞进变量、路径也脏掉（本批踩到）。
+  [ -d "$src" ] || { warn "源不存在，跳过：$src" >&2; return 1; }
+  local dest_dir dest prev=""
+  dest_dir="$(snap_dir_of "$ver")"
+  dest="$dest_dir/$(backup_stamp)"
+  local _k=2                      # 同一秒内连做两次 → 目录名会撞，加序号
+  while [ -e "$dest" ]; do dest="$dest_dir/$(backup_stamp)-$_k"; _k=$((_k+1)); done
+  [ "$mode" = "snapshot" ] && prev="$(snap_latest "$ver")"
+  if [ "$dry" = "1" ]; then
+    printf '  [dry-run] %s → %s（%s%s）\n' "$src" "$dest" "$mode" "${prev:+，硬链接基准 $(basename "$prev")}" >&2
+    return 0
+  fi
+  local sz_before=0
+  sz_before="$(du -sk "$dest_dir" 2>/dev/null | cut -f1 || echo 0)"
+  mkdir -p "$dest"
+  if [ "$mode" = "snapshot" ]; then
+    command -v rsync >/dev/null || { rmdir "$dest" 2>/dev/null || true; die '增量快照需要 rsync（没有它就用默认的全量备份）'; }
+    log "快照 $ver：rsync -a --delete${prev:+ --link-dest=$(basename "$prev")} …" >&2
+    local -a args=(-a --delete)
+    [ -n "$prev" ] && args+=(--link-dest="$prev")
+    if ! rsync "${args[@]}" "$src/" "$dest/"; then
+      trash_mv --label "snapshot-failed-$ver" --reason 'rsync 失败的半成品' "$dest" || true
+      die "rsync 失败，半成品已挪进回收站：$dest"
+    fi
+  else
+    if ! cp -a "$src/." "$dest/"; then
+      trash_mv --label "backup-failed-$ver" --reason 'cp 失败的半成品' "$dest" || true
+      die "cp -a 失败，半成品已挪进回收站：$dest"
+    fi
+  fi
+  snap_write_manifest "$dest" "$ver" "$src" "$mode" "${prev:-}"
+  # 「实际新增」= 版本目录 du 的差（du 在同一次遍历里对硬链接只算一次）——
+  # 表观大小 `du -sh $dest` 会把与旧快照共享的硬链接也计入，直接报它会误导。
+  local sz_after=0 added=0
+  sz_after="$(du -sk "$dest_dir" 2>/dev/null | cut -f1 || echo 0)"
+  added=$(( sz_after - ${sz_before:-0} )); [ "$added" -lt 0 ] && added=0
+  { printf 'added_kb=%s\n' "$added"; } >> "$dest/MANIFEST.kv"
+  # 边界（实测过的坑）：**不要**把快照文件置只读来"防篡改" —— `--link-dest` 的快速校验
+  # 比的是"全部保留属性"，快照文件只读(0444)与源(0644)权限不同 → rsync 认为文件变了 →
+  # 不再硬链接，增量快照当场退化成全量。篡改由 `--verify`（比 MANIFEST 新的文件）来发现。
+  log "快照完成：$dest（$(snap_manifest "$dest" files) 个文件）" >&2
+  if [ -n "$prev" ]; then
+    log "  实际新增 $(numfmt --to=iec $(( added * 1024 )) 2>/dev/null || printf '%sKB' "$added")；表观 $(du -sh "$dest" 2>/dev/null | cut -f1)（其余与 $(basename "$prev") 共享硬链接）" >&2
+  else
+    log "  实际占用 $(du -sh "$dest" 2>/dev/null | cut -f1)" >&2
+  fi
+  printf '%s\n' "$dest"
+}
+
+backup_state() {  # [dry|live]：把状态账本快照到本地（不进仓库）；**stdout 只返回快照路径**
+  local dry=0; [ "${1:-live}" = "dry" ] && dry=1
+  [ -d "$STATE_ROOT" ] || { warn "没有状态账本（$STATE_ROOT）→ 跳过" >&2; return 0; }
+  local dest="$STATE_SNAP_ROOT/$(backup_stamp)"
+  if [ "$dry" = "1" ]; then printf '  [dry-run] %s → %s（state 只本地备份，不进仓库）\n' "$STATE_ROOT" "$dest" >&2; return 0; fi
+  mkdir -p "$dest"
+  if ! cp -a "$STATE_ROOT/." "$dest/"; then
+    trash_mv --label 'state-snapshot-failed' --reason 'cp 失败的半成品' "$dest" || true
+    die "状态账本快照失败，半成品已挪进回收站：$dest"
+  fi
+  snap_write_manifest "$dest" 'state' "$STATE_ROOT" 'full' ''
+  log "状态账本快照完成：$dest（$(du -sh "$dest" 2>/dev/null | cut -f1)）" >&2
+  printf '%s\n' "$dest"
+}
+
+backup_list() {  # [<版本>]
+  local only="${1:-}"
+  log "快照根：$SNAP_ROOT"
+  local d ver s
+  if [ -d "$SNAP_ROOT" ]; then
+    for d in "$SNAP_ROOT"/*/; do
+      [ -d "$d" ] || continue
+      ver="$(basename "$d")"
+      [ -n "$only" ] && [ "$ver" != "$only" ] && continue
+      printf '  %-16s %s 份  共 %s\n' "$ver" "$(du_count "$d"*/)" "$(du_size "$d")"
+      while IFS= read -r s; do
+        [ -n "$s" ] || continue
+        local ak show
+        ak="$(snap_manifest "$s" added_kb)"
+        if [ -n "$ak" ]; then show="$(numfmt --to=iec $(( ak * 1024 )) 2>/dev/null || printf '%sKB' "$ak") 新增"
+        else show="$(snap_manifest "$s" size)"; fi
+        printf '      %-18s %-12s %s 个文件  %-9s %s\n' "$(basename "$s")" "$show" \
+          "$(snap_manifest "$s" files)" "$(snap_manifest "$s" mode)" \
+          "$([ -n "$(snap_manifest "$s" link_dest)" ] && printf '硬链接自 %s（表观 %s）' "$(basename "$(snap_manifest "$s" link_dest)")" "$(snap_manifest "$s" size)")"
+      done < <(ls -1dt "$d"*/ 2>/dev/null || true)
+    done
+  else
+    printf '  （还没有任何快照）\n'
+  fi
+  printf '  %-16s %s 份  共 %s\n' '状态账本' "$(du_count "$STATE_SNAP_ROOT"/*/)" "$(du_size "$STATE_SNAP_ROOT")"
+  printf '  旧式全量备份（%s 下）：%s 个目录\n' "$BACKUP_ROOT" "$(du_count "$BACKUP_ROOT"/*/)"
+}
+
 cmd_backup() {
-  [ $# -ge 1 ] || die "用法: rdsh backup <序号|版本名|项目名>"
-  local entry; entry=$(resolve_target "$1")
-  [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理'
-  local ver data
-  ver=$(entry_field "$entry" 1); data=$(entry_field "$entry" 4)
-  [ -d "$data" ] || die "版本 $ver 尚无数据目录（$data）"
-  local dest="$BACKUP_ROOT/$ver-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$(dirname "$dest")"
-  log "备份 $data -> $dest"
-  cp -a "$data" "$dest"
-  log '备份完成'
+  local ver_arg="" mode="full" want_state=0 verify=0 keep="" do_list=0 dry=0 verify_only="" label="" a
+  local -a rest=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --snapshot) mode="snapshot" ;;
+      --full) mode="full" ;;
+      --state) want_state=1 ;;
+      --all) ver_arg="__ALL__" ;;
+      --verify) verify=1 ;;
+      --keep) shift; keep="${1:-}" ;;
+      --keep=*) keep="${a#--keep=}" ;;
+      --list) do_list=1 ;;
+      --label) shift; label="${1:-}" ;;
+      --label=*) label="${a#--label=}" ;;
+      --dry-run|-n) dry=1 ;;
+      -*) die "未知选项：$a（rdsh backup [<目标>|--all] [--snapshot|--full] [--state] [--verify] [--keep N] [--list] [--dry-run]）" ;;
+      *) rest+=("$a") ;;
+    esac
+    shift || true
+  done
+  if [ "$verify" = "1" ] && [ "${#rest[@]}" -gt 0 ] && [ -f "${rest[0]}/MANIFEST.kv" ]; then
+    verify_only="${rest[0]}"          # 兼容：rdsh backup --verify <快照目录>
+  fi
+  if [ -n "$verify_only" ]; then snap_verify "$verify_only"; return $?; fi
+  [ -n "$keep" ] && case "$keep" in ''|*[!0-9]*) die "--keep 需要正整数（收到：$keep）" ;; esac
+  [ -n "$ver_arg" ] || ver_arg="${rest[0]:-}"     # 位置参数（版本/序号）也认
+  if [ "$do_list" = "1" ]; then backup_list "${rest[0]:-}"; return 0; fi
+  [ -n "$ver_arg" ] || [ "$want_state" = "1" ] || die '用法: rdsh backup <目标|--all> [--snapshot] [--state] [--verify] [--keep N] [--dry-run]
+       rdsh backup --list [<版本>]
+       rdsh backup --verify <快照目录>'
+
+  local failed=0
+  if [ "$want_state" = "1" ] || [ "$ver_arg" = "__ALL__" ]; then
+    backup_state "$([ "$dry" = "1" ] && echo dry || echo live)" || failed=$((failed+1))
+  fi
+  if [ "$ver_arg" = "__ALL__" ]; then
+    local e ver data snap
+    for e in "${ENTRIES[@]:-}"; do
+      [ -n "$e" ] || continue
+      ver="$(entry_field "$e" 1)"; data="$(entry_field "$e" 4)"
+      [ -d "$data" ] || { warn "$ver：无数据目录，跳过"; continue; }
+      snap="$(backup_one "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
+      if [ "$verify" = "1" ] && [ -n "$snap" ] && [ -f "$snap/MANIFEST.kv" ]; then snap_verify "$snap" || failed=$((failed+1)); fi
+      if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ver" "$keep"; fi
+    done
+  elif [ -n "$ver_arg" ]; then
+    local entry; entry="$(resolve_target "$ver_arg")"
+    [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理'
+    local ver data snap
+    ver="$(entry_field "$entry" 1)"; data="$(entry_field "$entry" 4)"
+    [ -d "$data" ] || die "版本 $ver 尚无数据目录（$data）"
+    snap="$(backup_one "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
+    if [ "$verify" = "1" ] && [ -n "$snap" ] && [ -f "$snap/MANIFEST.kv" ]; then snap_verify "$snap" || failed=$((failed+1)); fi
+    if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ver" "$keep"; fi
+  fi
+  [ "$failed" = "0" ] || { warn "$failed 项未完成"; return 1; }
 }
 
 # ---------------- base：查看/设置基目录（P1：只改指向，不搬数据） ----------------
@@ -2263,6 +2503,7 @@ trash_mv() {  # [--label 名] [--reason 说明] [--quiet] <路径>...
   fi
   if ! mkdir -p "$dest" 2>/dev/null; then warn "无法创建回收条目 $dest"; return 1; fi
   local n=0 total="0" moved=0 items=""
+  TRASH_LAST_DEST=""; TRASH_LAST_ITEMS=()
   for x in "${have[@]}"; do
     local bn tgt; bn="$(basename "$x")"; tgt="$dest/$bn"; i=2
     while [ -e "$tgt" ]; do tgt="$dest/$bn-$i"; i=$((i+1)); done
@@ -2273,6 +2514,7 @@ dest.$n=$tgt
 size.$n=${sz:-?}
 restore.$n=mv $tgt $x
 "
+      TRASH_LAST_ITEMS+=("$tgt")
       moved=1
     else
       warn "无法移动：$x（权限？）→ 请手动处理"
@@ -2291,6 +2533,7 @@ restore.$n=mv $tgt $x
     } > "$dest/.rdsh-trash.kv"
     printf '%s|%s|%s|%s|%s|%s\n' "$at" "$(basename "$dest")" "$label" "$total" "${reason:-—}" "$dev" >> "$TRASH_INDEX"
   )
+  TRASH_LAST_DEST="$dest"      # 供 restore --merge 之类复用"刚被挪走的那一份"
   if [ "$quiet" != "1" ]; then
     warn "已移到回收站：$dest"
     warn "  还原：rdsh trash restore $(basename "$dest")    体积：$total"
@@ -2476,6 +2719,7 @@ cmd_du() {
         warn "跳过（$age_d 天 < ${keepd} 天，要删加 --force）：$(basename "$v")"; continue
       fi
     fi
+    chmod -R u+w "$v" 2>/dev/null || true     # 只读快照删不动 → 先解锁再删
     rm -rf "$v" && log "已删除：$v" || { warn "删除失败：$v"; failed=$((failed+1)); }
   done
   ( umask 077; printf '%s|purge|%s|older=%s force=%s\n' "$(date -Is)" "$purge" "${older:-无}" "$force" >> "$TRASH_INDEX" )
@@ -2543,6 +2787,306 @@ USAGE
       ;;
     *) die '用法: rdsh trash [ls|restore <条目名|--last> [--force]]' ;;
   esac
+}
+
+# ---------------- restore：从本地快照 / 本地克隆 / 远端仓库 恢复 ----------------
+# 三类来源，语义不同（分开对待，不做"全部下载"）：
+#   ① 本地快照 —— $BACKUP_ROOT/snapshots|state-snapshots（数据 home / 状态账本）。
+#                 **会话数据只认这一条路**（隐私裁定），远端一律拒绝
+#   ② 本地克隆 —— 「我的 dsh」仓库的本地克隆（插件/补丁/稳定根/预设/配置）
+#   ③ 远端仓库 —— git URL（clone 到本地再按 ② 处置；不接受 --type data/state）
+# 安全：
+#   * 覆盖前把既有目标整体挪进回收站（带清单 → 一步还原）
+#   * 凭据 .credentials.yaml **默认不恢复**（要显式 --with-creds）
+#   * 记忆三库（lessons/facts/backlog）默认**按条目追加**（append-only 语义），不整文件覆盖
+#   * 没有 --yes 只预览；收尾自动调 doctor
+RESTORE_TYPES="data state plugins patches shared presets config"
+MD_LIBS="lessons.md facts.md backlog.md"
+DOCTOR_AFTER=1
+
+restore_type_src() {  # <类型> → 该类型在源里的相对路径
+  case "$1" in
+    data|state) printf '' ;;
+    plugins) printf 'plugins' ;;
+    patches) printf 'patches' ;;
+    shared)  printf 'shared' ;;
+    presets) printf 'shared/presets' ;;
+    config)  printf 'config/rdsh.config' ;;
+  esac
+}
+restore_type_dst() {  # <类型> <版本> → 本机目标路径
+  case "$1" in
+    data)    printf '%s/%s' "$DATA_ROOT" "${2:?data 需要版本号}" ;;
+    state)   printf '%s' "$STATE_ROOT" ;;
+    plugins) printf '%s' "$PLUGIN_ROOT" ;;
+    patches) printf '%s' "$PATCHES_ROOT" ;;
+    shared)  printf '%s' "$SHARED_ROOT" ;;
+    presets) printf '%s/.agent-presets' "$SHARED_ROOT" ;;
+    config)  printf '%s' "$RDSH_CONFIG" ;;
+  esac
+}
+restore_type_kind() { case "$1" in config) printf 'file' ;; *) printf 'dir' ;; esac; }
+
+md_headings()  { [ -f "$1" ] && grep '^## ' "$1" 2>/dev/null || true; }
+md_new_count() { comm -23 <(md_headings "$1" | sort -u) <(md_headings "$2" | sort -u) 2>/dev/null | grep -c . || true; }
+md_merge_append() {  # <源> <目标>：把源里目标没有的 ## 块**追加**到目标
+  local src="$1" dst="$2" n extra
+  [ -f "$src" ] || return 1
+  if [ ! -f "$dst" ]; then cp -p "$src" "$dst"; return 0; fi
+  n="$(md_new_count "$src" "$dst")"
+  if [ "${n:-0}" = "0" ]; then log "  = $(basename "$dst")：没有新条目"; return 0; fi
+  extra="$(awk -v dstfile="$dst" '
+    BEGIN { while ((getline line < dstfile) > 0) have[line]=1 }
+    /^## / { if (!($0 in have)) { keep=1; nb++; buf[nb]=$0 } else { keep=0 } ; next }
+    { if (keep) buf[nb] = buf[nb] "\n" $0 }
+    END { for (i=1;i<=nb;i++) print buf[i] }
+  ' "$src")"
+  { printf '\n'; printf '%s\n' "$extra"; } >> "$dst"
+  log "  + $(basename "$dst")：追加了 $n 条"
+}
+
+restore_resolve_ver() {  # <版本片段> → 账本/快照里的确切版本键
+  local want="$1" e k hit="" n=0
+  [ -n "$want" ] || return 0
+  if [ "${#ENTRIES[@]}" -gt 0 ]; then
+    e="$(resolve_target "$want" 2>/dev/null || true)"
+    case "$e" in UNMANAGED:*|"") ;; *) entry_key "$e"; return 0 ;; esac
+  fi
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    case "$k" in *"$want"*) hit="$k"; n=$((n+1)) ;; esac
+  done < <(state_keys)
+  [ "$n" = "1" ] && { printf '%s' "$hit"; return 0; }
+  printf '%s' "$want"
+}
+
+usage_restore() {
+  cat <<'USAGE'
+rdsh restore —— 从本地快照 / 本地克隆 / 远端仓库 恢复
+
+用法:
+  rdsh restore --list
+  rdsh restore --type <类> [--from <源>] [--file <相对路径>] [选项]
+
+资产类型:
+  data      某版本的数据 home（含会话/存储）——**只从本地快照恢复**，远端一律拒绝
+  state     状态账本（只本地快照；账本不进任何仓库）
+  plugins / patches / shared / presets / config
+
+来源 --from:
+  <本地目录>   rdsh 快照目录（含 MANIFEST.kv）或「我的 dsh」本地克隆
+  git:<URL>    远端仓库（clone 到本地再恢复；不接受 data/state）
+  省略         data/state 取本地最新快照；其余取 $RDSH_MYDSH_REPO
+
+选项:
+  --diff           只显示差异（rsync --dry-run / 记忆三库条目差）
+  --merge          记忆三库按条目**追加**，不整文件覆盖（shared/data 可用）
+  --with-creds     data 恢复时连 .credentials.yaml 一起（默认跳过）
+  --dry-run        只预览
+  --yes, -y        真正写入（既有目标先整体挪进回收站，可一步还原）
+  --no-doctor      收尾不调 doctor
+USAGE
+}
+
+cmd_restore_list() {
+  log '可用来源'
+  echo
+  printf '  本地快照（数据 home）：%s\n' "$SNAP_ROOT"
+  local d
+  for d in "$SNAP_ROOT"/*/; do
+    [ -d "$d" ] || continue
+    printf '    %-16s %s 份  最新 %s\n' "$(basename "$d")" "$(du_count "$d"*/)" \
+      "$(basename "$(ls -1dt "$d"*/ 2>/dev/null | sed -n '1p' || true)")"
+  done
+  [ -d "$SNAP_ROOT" ] || printf '    （还没有快照 → rdsh backup --all --state --snapshot）\n'
+  printf '  状态账本快照：%s（%s 份）\n' "$STATE_SNAP_ROOT" "$(du_count "$STATE_SNAP_ROOT"/*/)"
+  printf '  回收站：%s（%s 个条目；rdsh trash restore 可整份还原）\n' "$TRASH_ROOT" "$(du_count "$TRASH_ROOT"/*/)"
+  if [ -n "$MYDSH_REPO" ]; then
+    printf '  「我的 dsh」本地克隆（MYDSH_REPO）：%s%s\n' "$MYDSH_REPO" "$([ -d "$MYDSH_REPO" ] || printf '  ⚠️ 不存在')"
+  else
+    printf '  「我的 dsh」本地克隆：未配置（设 MYDSH_REPO 或 --from <目录>）\n'
+  fi
+  printf '  远端：--from git:<URL>（plugins/patches/shared/presets/config；data/state 不接受）\n'
+}
+
+cmd_restore() {
+  local from="" type="" file="" ver="" diff_only=0 merge=0 creds=0 dry=0 yes=0 a
+  local -a rest=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --list) cmd_restore_list; return 0 ;;
+      --from) shift; from="${1:-}" ;;
+      --from=*) from="${a#--from=}" ;;
+      --type) shift; type="${1:-}" ;;
+      --type=*) type="${a#--type=}" ;;
+      --file) shift; file="${1:-}" ;;
+      --file=*) file="${a#--file=}" ;;
+      --diff) diff_only=1 ;;
+      --merge) merge=1 ;;
+      --with-creds) creds=1 ;;
+      --dry-run|-n) dry=1 ;;
+      --yes|-y) yes=1 ;;
+      --no-doctor) DOCTOR_AFTER=0 ;;
+      -h|--help|help) usage_restore; return 0 ;;
+      -*) die "未知选项：$a（rdsh restore --list / --help 看用法）" ;;
+      *) rest+=("$a") ;;
+    esac
+    shift || true
+  done
+  # 位置参数归属：没给 --type 时第一个位置参数是类型，给了则是版本
+  if [ -z "$type" ]; then type="${rest[0]:-}"; [ -n "$ver" ] || ver="${rest[1]:-}"
+  else [ -n "$ver" ] || ver="${rest[0]:-}"; fi
+  [ -n "$type" ] || { usage_restore; return 1; }
+  case " $RESTORE_TYPES " in *" $type "*) ;; *) die "未知资产类型：$type（可选：$RESTORE_TYPES）" ;; esac
+
+  local src_kind=""
+  if [ -n "$from" ]; then
+    case "$from" in
+      git:*|http://*|https://*|git@*|ssh://*) src_kind="git" ;;
+      *) src_kind="local" ;;
+    esac
+  else
+    case "$type" in
+      data|state) src_kind="local" ;;
+      *) if [ -n "$MYDSH_REPO" ]; then src_kind="local"; from="$MYDSH_REPO"
+         else die '没给 --from，也没配置 MYDSH_REPO（「我的 dsh」本地克隆路径）'; fi ;;
+    esac
+  fi
+  if [ "$src_kind" = "git" ]; then
+    case "$type" in
+      data|state) die "拒绝：$type 是会话/本机状态数据，**只从本地源恢复**（隐私裁定）。远端只用于 plugins/patches/shared/presets/config" ;;
+    esac
+    local url="${from#git:}" dest="$BACKUP_ROOT/restore-src-$(backup_stamp)"
+    if [ "$dry" = "1" ]; then
+      printf '  [dry-run] git clone --depth 1 %s %s\n' "$url" "$dest"; return 0
+    fi
+    log "克隆远端仓库 → $dest"
+    git clone --depth 1 "$url" "$dest" >/dev/null 2>&1 || die "clone 失败：$url"
+    from="$dest"
+    log '已克隆到本地（保留备查）：'"$from"
+  fi
+  if [ -z "$from" ]; then
+    case "$type" in
+      state) from="$(ls -1dt "$STATE_SNAP_ROOT"/*/ 2>/dev/null | sed -n '1p' || true)" ;;
+      data)
+        local vkey; vkey="$(restore_resolve_ver "$ver")"
+        [ -n "$vkey" ] || die 'data 恢复要指明版本：rdsh restore --type data <版本片段>'
+        from="$(ls -1dt "$(snap_dir_of "$vkey")"/*/ 2>/dev/null | sed -n '1p' || true)"
+        [ -n "$from" ] && ver="$vkey" ;;
+    esac
+    [ -n "$from" ] || die "本地快照里找不到可用的 $type 源（先 rdsh backup）"
+    log "未指定 --from，用最新本地快照：$from"
+  fi
+  [ -d "$from" ] || die "源目录不存在：$from"
+  local src_is_snap=0
+  if [ -f "$from/MANIFEST.kv" ]; then
+    src_is_snap=1
+    local mver; mver="$(snap_manifest "$from" version)"
+    if [ "$mver" = "state" ]; then
+      [ "$type" = "state" ] || die "该快照是状态账本快照（version=state）→ 用 --type state"
+    else
+      case "$type" in
+        data|state) [ -n "$ver" ] || ver="$mver" ;;
+        *) die "该快照是数据 home 快照（版本 $mver）→ 用 --type data" ;;
+      esac
+    fi
+  else
+    case "$type" in
+      data|state) die "该目录不是 rdsh 快照（没有 MANIFEST.kv）：$from" ;;
+      *) [ -d "$from/plugins" ] || [ -d "$from/shared" ] || warn "源里既没有 plugins/ 也没有 shared/，可能不是「我的 dsh」克隆：$from" ;;
+    esac
+  fi
+
+  local rel src dst
+  rel="$(restore_type_src "$type")"
+  if [ "$type" = "state" ]; then dst="$(restore_type_dst state '')"; else dst="$(restore_type_dst "$type" "$ver")"; fi
+  case "$type" in data|state) src="$from" ;; *) src="$from/${rel}" ;; esac
+  if [ -n "$file" ]; then
+    src="$src/$file"
+    [ "$(restore_type_kind "$type")" = "dir" ] && dst="$dst/$file"
+  fi
+  [ -e "$src" ] || die "源里没有这一项：$src"
+
+  log "恢复：$type（源=$([ "$src_kind" = git ] && printf '远端克隆' || printf '本地')）"
+  printf '  源  ：%s\n  目标：%s%s\n' "$src" "$dst" "$([ -e "$dst" ] && printf '（已存在 → 先整体挪进回收站）' || printf '（新建）')"
+  if [ "$type" = "data" ]; then
+    printf '  说明：含会话/存储；凭据 .credentials.yaml %s；恢复后请重启该版本实例\n' \
+      "$([ "$creds" = "1" ] && printf '一并恢复（--with-creds）' || printf '默认跳过（要它加 --with-creds）')"
+  fi
+
+  local kind; kind="$(restore_type_kind "$type")"
+  if [ "$diff_only" = "1" ]; then
+    log '--diff：只看差异'
+    if [ "$kind" = "file" ]; then
+      diff -u "$dst" "$src" 2>/dev/null | head -40 || printf '  （目标不存在或无法比较）\n'
+    else
+      local nd=""
+      command -v rsync >/dev/null && nd="$(rsync -ain --delete "$src/" "$dst/" 2>/dev/null | grep -c '^[<>]' || true)"
+      printf '  与目标比：%s 处差异\n' "${nd:-（无 rsync，跳过目录比较）}"
+      local lib
+      for lib in $MD_LIBS; do
+        [ -f "$src/$lib" ] && printf '    %-14s 源里有 %s 条目标没有\n' "$lib" "$(md_new_count "$src/$lib" "$dst/$lib")"
+      done
+    fi
+    return 0
+  fi
+  if [ "$dry" = "1" ] || [ "$yes" != "1" ]; then
+    log "$([ "$dry" = "1" ] && printf -- '--dry-run' || printf '预览模式（没有 --yes）')：没有写入任何东西"
+    [ "$merge" = "1" ] && log "（--merge：$MD_LIBS 按条目追加，不整文件覆盖）"
+    return 0
+  fi
+
+  if [ "$merge" = "1" ] && { [ "$type" = "shared" ] || [ "$type" = "data" ]; }; then
+    trash_mv --label "restore-$type" --reason "restore --merge 前的既有内容" "$dst" || warn '挪走既有内容失败'
+    local oldroot="${TRASH_LAST_ITEMS[0]:-}"
+    mkdir -p "$dst"
+    if [ "$type" = "shared" ]; then rsync -a "$src/" "$dst/"; else cp -a "$src/." "$dst/"; fi
+    local lib
+    for lib in $MD_LIBS; do
+      [ -f "$src/$lib" ] || continue
+      if [ -n "$oldroot" ] && [ -f "$oldroot/$lib" ]; then
+        cp -p "$oldroot/$lib" "$dst/$lib.old-copy"
+        md_merge_append "$src/$lib" "$dst/$lib.old-copy" >/dev/null 2>&1 || true
+        cp -p "$dst/$lib.old-copy" "$dst/$lib"
+      fi
+      md_merge_append "$src/$lib" "$dst/$lib"
+    done
+    log "合并完成；旧内容在回收站：${oldroot:-（未挪）}（rdsh trash restore 可整份还原）"
+  else
+    if [ -e "$dst" ]; then
+      trash_mv --label "restore-$type" --reason "restore $type 覆盖前的既有内容" "$dst" || warn '挪走既有内容失败'
+    fi
+    if [ "$kind" = "file" ]; then
+      mkdir -p "$(dirname "$dst")"; cp -p "$src" "$dst"
+    elif [ "$type" = "data" ]; then
+      mkdir -p "$dst"
+      # MANIFEST.kv 是快照的元数据，不属于数据 home，不能复制进去
+      local -a ex=(--exclude=MANIFEST.kv)
+      [ "$creds" = "1" ] || ex+=(--exclude=.credentials.yaml)
+      # 快照是**只读**的（防就地改动连带改坏更早的快照）；恢复出来的东西必须可写，
+      # 否则 dsh 连自己的数据 home 都写不了 —— 用 --chmod 给目录/文件补 u+w
+      [ "$src_is_snap" = "1" ] && ex+=(--chmod=Du+w,Fu+w)
+      rsync -a "${ex[@]}" "$src/" "$dst/" || die 'rsync 失败'
+      chmod 700 "$dst" 2>/dev/null || true
+    else
+      mkdir -p "$dst"
+      local -a ex2=()
+      if [ "$src_is_snap" = "1" ]; then ex2+=(--exclude=MANIFEST.kv --chmod=Du+w,Fu+w); fi
+      rsync -a "${ex2[@]}" "$src/" "$dst/" || die 'rsync 失败'
+    fi
+    log "已恢复 $type → $dst"
+  fi
+
+  if [ "${DOCTOR_AFTER:-1}" = "1" ] && [ -f "$MANAGE_ROOT/doctor.sh" ]; then
+    echo
+    log '收尾验证（doctor --quiet）：'
+    bash "$MANAGE_ROOT/doctor.sh" --quiet 2>&1 | tail -6 || warn 'doctor 未通过或无输出 → 手工跑 rdsh doctor'
+  else
+    log '收尾：跑一次 rdsh doctor（断链/账本/插件一致性）'
+  fi
+  [ "$type" = "data" ] && warn '数据 home 已恢复 → 重启该版本实例后生效'
+  return 0
 }
 
 remote_tags_git() {  # git 协议列举（备选；某些网络对 git over HTTPS 不友好）
@@ -2692,6 +3236,7 @@ main() {
   case "$cmd" in
     base|fetch|help|-h|--help|doctor ) : ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    restore ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
   case "$cmd" in
@@ -2710,6 +3255,7 @@ main() {
     state ) shift; cmd_state "$@" ;;
     du ) shift; cmd_du "$@" ;;
     trash|trashcan ) shift; cmd_trash "$@" ;;
+    restore ) shift; cmd_restore "$@" ;;
     patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
     doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
     fetch|download|dl ) shift; cmd_fetch "$@" ;;

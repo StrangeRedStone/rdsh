@@ -30,7 +30,8 @@
 | `rdsh add <检出路径>` | 把检出纳入管理 |
 | `rdsh install [版本]` | `pnpm install` + 构建 + 打标 |
 | `rdsh data [-o] [版本]` | 显示 / 打开数据目录 |
-| `rdsh backup [版本]` | 备份数据目录到 `$BASE/.dsh-backup/` |
+| `rdsh backup [<目标>\|--all] [--snapshot\|--full] [--state] [--verify] [--keep N]` | **本地**快照数据 home 与状态账本。`--snapshot` 用 `rsync --link-dest` 做**增量**（未变化的文件是硬链接，只存变化）；`--verify` 核查快照定稿后有没有被改过；`--keep N` 保留策略（超出的进回收站）；`--list` 列快照 |
+| `rdsh restore --list` / `--type <类> [--from <源>] [--file <路径>] [--diff] [--merge] [--yes]` | 从**本地快照 / 本地克隆 / 远端仓库**恢复。`data`/`state` **只认本地源**；凭据默认不恢复（`--with-creds`）；记忆三库默认**按条目追加**；覆盖前既有目标整体进回收站；收尾自动调 `doctor` |
 | `rdsh logs [-f] [-o] [--clean] [版本]` | 查看启动日志（显示时自动打码 token；按端口分家） |
 | `rdsh base [路径] [--unset]` | 查看 / 设置基目录（只改指向，**不搬数据**） |
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
@@ -64,7 +65,7 @@ $BASE/
 ├── dsh/                  # 本仓库 + 各版本检出（<检出目录>/ 自动扫描）
 ├── .dsh/<版本号>/        # 每版本独立数据根（DSH_HOME）
 ├── .dsh-shared/          # 与版本无关的作者资产（软链进各 home）
-├── .dsh-backup/          # 备份 + 回退基线.md（生成物，勿手改）
+├── .dsh-backup/          # 备份 + 回退基线.md（生成物）+ snapshots/ + state-snapshots/
 ├── .dsh-logs/            # 启动日志（700/600，含访问 token）
 ├── dsh-plugins/          # 插件的唯一权威副本
 └── .dsh-suite/           # 运行期状态（新件都在这一层，可用配置逐项改位置）
@@ -120,6 +121,8 @@ rdsh start
 | `RDSH_TRASH` | `$BASE/.dsh-suite/trash` | 回收站根。**默认与 `BASE` 同文件系统** —— 跨设备 `mv` 会退化成"复制+删除"（慢、瞬时双份占用），旧默认 `/tmp` 还可能是 tmpfs（≈内存） |
 | `RDSH_TRASH_KEEP_DAYS` | `7` | 回收项小于这个天数时，`du --purge trash` 需要 `--force` |
 | `RDSH_STATE_ROOT` | `$BASE/.dsh-suite/state` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
+| `RDSH_MYDSH_REPO` | （空） | 「我的 dsh」本地克隆路径；`rdsh restore` 不写 `--from` 时用它 |
+| `RDSH_PATCHES` | `$BASE/dsh-patches` | 补丁仓（与 `patch-manager.sh` 同默认） |
 | `RDSH_RUN_DIR` | `$BASE/.dsh-suite/run` | 实例注册表（注解层，真相是 `ss` + `/proc`） |
 | `RDSH_DEBUG_ROOT` | `$BASE/.dsh-suite/debug` | 调试沙箱（`rdsh debug`） |
 | `RDSH_CONFIG` | `~/.config/rdsh/config` | 配置文件路径 |

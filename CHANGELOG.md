@@ -2,6 +2,40 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.5.0 — 2026-09-29
+
+### 新增
+
+- **`rdsh backup` 重做**：数据 home 与状态账本的**本地**快照。
+  - `--snapshot`：`rsync -a --link-dest=<上一份>` 增量 —— 未变化的文件是**硬链接**，只存变化（实测：3 份 263M 的数据 home 快照合计只占 265M，全量副本要 789M；单轮实际新增 2.1M）。
+  - 每份快照带 `MANIFEST.kv`（版本/来源/模式/`link_dest`/文件数/体积/**`added_kb`（实际新增）**）。
+  - `--verify` 核查**内部一致性**：文件数与清单一致、全部可读、**没有文件比 MANIFEST 还新**（定稿后被就地改动的证据）。
+  - `--keep N` 保留策略：超出的快照**挪进回收站**（可还原），不 `rm`。
+  - `--state` 快照状态账本（按用户裁定：state 只本地备份，不进任何仓库）；`--all` 对全部版本逐一快照；`--list` 列出快照账本。
+  - 同一秒内连做两次快照不再撞目录名（自动加序号）。
+- **`rdsh restore`**：三类来源 × 七种资产类型。
+  - 来源：**本地快照**、**本地克隆**（`--from <目录>`）、**远端仓库**（`--from git:<URL>`，clone 到本地再恢复）。
+  - 类型：`data` / `state` / `plugins` / `patches` / `shared` / `presets` / `config`；`--file` 可只恢复单个文件。
+  - **隐私分界**：`data`/`state` **只认本地源**，`--from git:…` 一律拒绝并说明理由；`data` 恢复时 `.credentials.yaml` **默认跳过**（`--with-creds` 才带）。
+  - **记忆三库按条目追加**（`lessons.md`/`facts.md`/`backlog.md` 是 append-only 语义）：`--merge` 只补目标缺的 `##` 块，并留 `.old-copy` 供对照。
+  - 覆盖前把既有目标整体**挪进回收站**（逐项还原命令在清单里）；`--diff` 只看差异；没有 `--yes` 只预览；收尾自动调 `doctor`（`--no-doctor` 可关）。
+- `tools/smoke-backup-restore.sh`（42 项断言）+ CI 一步：比 **inode** 证硬链接、比"版本目录 `du` 差"证省空间、验篡改检出、验只读/隐私/合并语义与"真机资产未动"。
+
+### 变更
+
+- `Rdsh.sh` 新增 `PLUGIN_ROOT`、`PATCHES_ROOT`、`MYDSH_REPO`、`SNAP_ROOT`、`STATE_SNAP_ROOT` 等旋钮；`rdsh backup <目标>` 的旧行为保留为 `--full`（并在 `snapshots/<版本>/` 下统一存放）。
+- `trash_mv` 现在记录 `TRASH_LAST_DEST` 与各项新路径，供 `restore --merge` 等复用"刚被挪走的那一份"。
+
+### 修复（都由冒烟测试抓出）
+
+- **`${dry:+--dry-run}` 陷阱**：`dry=0` 也算"已设置" → 每次备份都变成 dry-run（什么都没写还报成功）。改为显式传 `dry|live`。
+- **同一函数既报日志又返回路径**（走同一个 stdout）：`$(backup_one …)` 把日志一起吞进变量，路径也脏了。改为**返回值只走 stdout、叙述一律 stderr**。
+- **`snap_files` 把 MANIFEST 自己算进文件数** → 写入前后各数一次导致 `--verify` 误报不一致。
+- **只读快照会废掉增量**（实测后撤回）：`--link-dest` 的快速校验比的是全部保留属性，快照文件只读(0444)与源(0644)权限不同 → rsync 认为文件变了 → 不再硬链接。篡改改由 `--verify` 发现。
+- **从快照恢复把 `MANIFEST.kv` 复制进数据 home**；以及恢复出的数据 home 只读（dsh 写不了自己的数据）。前者用 `--exclude=MANIFEST.kv`，后者用 `--chmod=Du+w,Fu+w`（仅在源是快照时）。
+- `restore` 的位置参数归属：给了 `--type` 时第一个位置参数才是版本（此前被当成类型吞掉 → 解析到 `SNAP_ROOT` 层）。
+- `rdsh backup --list` 不再用**表观大小**糊弄，改报"实际新增"（表观大小会把与旧快照共享的硬链接算进去）。
+
 ## 0.4.2 — 2026-09-29
 
 ### 新增
