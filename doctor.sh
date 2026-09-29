@@ -165,6 +165,25 @@ dim_entries() {
       say "  [warn]  $nm：.installed 未进 .git/info/exclude"
     fi
   done
+  # 同版本多份（B7）：数据 home 撞车是**真问题**（会互相写 workspace.json/settings）
+  local v dirs e dh dupe_v
+  # 注意：把 entry_ver 放进循环时必须**自己补换行** —— 它内部是 printf '%s'（无换行），
+  # 直接循环会把所有版本号拼成一行，uniq -d 永远为空（这个 bug 让"同版本多份"检查静默失效）
+  dupe_v="$(for e in "${ENTRIES[@]}"; do printf '%s\n' "$(entry_ver "$e")"; done | sort | uniq -d)"
+  if [ -n "$dupe_v" ]; then
+    while IFS= read -r v; do
+      [ -n "$v" ] || continue
+      dirs=""
+      for e in "${ENTRIES[@]}"; do [ "$(entry_ver "$e")" = "$v" ] && dirs="$dirs $(entry_dir "$e")"; done
+      find_f warn entries "同版本多份检出：$v →$dirs（各有次号与独立数据 home 才安全；跑 rdsh install / state --init 分配次号）"
+      say "  [warn]  同版本多份：$v"
+    done <<< "$dupe_v"
+    # 数据 home 撞车检查
+    local -a homes=()
+    for e in "${ENTRIES[@]}"; do homes+=("$(entry_data "$e")"); done
+    dh="$(printf '%s\n' "${homes[@]}" | sort | uniq -d)"
+    [ -n "$dh" ] && { find_f error entries "多份检出共用一个数据 home：$dh（会互相写 workspace.json/settings）"; say "  [error] 数据 home 撞车：$dh"; }
+  fi
 }
 
 # 账本列号：**从表头解析**，不写死 —— 字段顺序变了 doctor 也不该跟着错

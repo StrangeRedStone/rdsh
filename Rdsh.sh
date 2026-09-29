@@ -235,9 +235,11 @@ add_map_line() {  # <完整行>
   printf '%s\n' "$1" >> "$MAP_FILE"
 }
 
-data_home_for_name() {  # 检出目录名 -> 数据目录（.map 优先，其次 DATA_ROOT/<版本>）
-  local base="$1" ver="$2" row k v fb
-  fb=$(printf '%s/%s' "$DATA_ROOT" "$ver")
+data_home_for_name() {  # <检出目录名> <版本> [对象键] → 数据目录（.map 优先，其次 DATA_ROOT/<键>）
+  # 键 != 版本（同版本第二份起）→ 数据 home 也分开：$DATA_ROOT/<键>。
+  # 否则两份检出会写同一个 DSH_HOME（workspace.json/settings 互相踩），这正是 B7 要解决的。
+  local base="$1" ver="$2" key="${3:-$2}" row k v fb
+  fb=$(printf '%s/%s' "$DATA_ROOT" "$key")
   for row in "${MAP_DIRS[@]:-}"; do
     IFS='|' read -r k v <<<"$row"
     [ "$k" = "$base" ] || continue
@@ -267,7 +269,7 @@ collect_entries() {
     # 否则本工具自带的 docs/ examples/ 等目录会被误列成"版本"。
     [ -f "$d/package.json" ] || continue
     ver=$(read_version "${d%/}")
-    data=$(data_home_for_name "$base" "$ver")
+    data=$(data_home_for_name "$base" "$ver" "$(key_for_dir "${d%/}" "$ver")")
     ENTRIES+=("$ver|${d%/}|$base|$data")
   done
   local row path v data def
@@ -276,7 +278,7 @@ collect_entries() {
     IFS='|' read -r path v <<<"$row"
     [ -d "$path" ] || continue
     ver=$(read_version "$path")
-    [ -n "$v" ] && data="$v" || data=$(printf '%s/%s' "$DATA_ROOT" "$ver")
+    [ -n "$v" ] && data="$v" || data=$(printf '%s/%s' "$DATA_ROOT" "$(key_for_dir "$path" "$ver")")
     ENTRIES+=("$ver|${path%/}|$(basename "$path")|$data")
   done
   if [ "${#ENTRIES[@]}" -eq 0 ]; then
@@ -287,12 +289,17 @@ collect_entries() {
 }
 
 sort_entries() {  # 按版本语义倒序，最新在前（序号 1 = 默认）
+  # 同版本多份时**必须确定**：主键版本倒序、次键检出目录名升序 ——
+  # 否则"谁先拿到裸版本号"取决于 glob/sort 的任意顺序（B7 实测踩到）
   local -a tmp=()
-  local e line v
-  for e in "${ENTRIES[@]}"; do v="${e%%|*}"; tmp+=("$v|$e"); done
-  mapfile -t tmp < <(printf '%s\n' "${tmp[@]}" | sort -Vr)
+  local e line v base
+  for e in "${ENTRIES[@]}"; do
+    v="${e%%|*}"; base="${e#*|}"; base="${base%%|*}"
+    tmp+=("$v|$base|$e")
+  done
+  mapfile -t tmp < <(printf '%s\n' "${tmp[@]}" | sort -t'|' -k1,1Vr -k2,2)
   ENTRIES=()
-  for line in "${tmp[@]}"; do ENTRIES+=("${line#*|}"); done
+  for line in "${tmp[@]}"; do ENTRIES+=("${line#*|*|}"); done
 }
 
 entry_field() {  # <entry> <1..4> = version|dir|base|data
@@ -301,9 +308,57 @@ entry_field() {  # <entry> <1..4> = version|dir|base|data
   case "$n" in 1) printf '%s' "$f1";; 2) printf '%s' "$f2";; 3) printf '%s' "$f3";; 4) printf '%s' "$f4";; esac
 }
 
-entry_key() {  # <entry> → state 账本里的对象键。B1 用版本号；B7 起同版本多份会带 -2 次号
-  local ver; ver=$(entry_field "$1" 1)
+# 对象键 = 同版本多份的**身份**。规则（B7）：
+#   ① 账本里已登记的键（同一 dir）→ 权威，永不变
+#   ② 检出内 .installed 的 key= 回声 → 脱离账本时仍自描述
+#   ③ 目录名尾部的 -N（fetch 造第二份时的默认命名）→ 未登记也能自描述
+#   ④ 都没有 → 版本号（首份）
+# 关键：**不按"现有份数"现算**。身份一旦分配就不变、不压缩、不重用（删了留墓碑）。
+key_for_dir() {  # <检出目录> <版本> → 对象键
+  local dir="$1" ver="$2" k bn inner
+  dir="$(readlink -f "$dir" 2>/dev/null || printf '%s' "$dir")"
+  k="$(state_key_for_dir "$dir")"
+  [ -n "$k" ] && { printf '%s' "$k"; return 0; }
+  if [ -f "$dir/.installed" ]; then
+    k="$(sed -nE 's/^key=(.*)$/\1/p' "$dir/.installed" 2>/dev/null | tail -1)"
+    [ -n "$k" ] && { printf '%s' "$k"; return 0; }
+  fi
+  bn="$(basename "$dir")"
+  case "$bn" in
+    *-"$ver"-*)
+      inner="${bn##*-"$ver"-}"
+      case "$inner" in ''|*[!0-9]*) ;; *) printf '%s-%s' "$ver" "$inner"; return 0 ;; esac
+      ;;
+  esac
   printf '%s' "$ver"
+}
+
+entry_key() {  # <entry> → 对象键
+  key_for_dir "$(entry_field "$1" 2)" "$(entry_field "$1" 1)"
+}
+
+state_next_key() {  # <版本> → 下一个可用键（max+1）
+  # **含已退休墓碑**（账本里的 retired 行）与磁盘上的目录名尾号 —— 绝不重用编号，
+  # 否则旧引用（日志名/备份名/回收清单/基线记录）会静默指向另一个对象。
+  local ver="$1" k n max=1 d bn inner
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    case "$k" in
+      "$ver") ;;
+      "$ver"-[0-9]*) n="${k##*-}"; [ "$n" -gt "$max" ] 2>/dev/null && max="$n" ;;
+    esac
+  done < <(state_keys)
+  for d in "$MANAGE_ROOT"/*/; do
+    [ -d "$d" ] || continue
+    bn="$(basename "$d")"
+    case "$bn" in
+      *-"$ver"-*)
+        inner="${bn##*-"$ver"-}"
+        case "$inner" in ''|*[!0-9]*) ;; *) [ "$inner" -gt "$max" ] 2>/dev/null && max="$inner" ;; esac
+        ;;
+    esac
+  done
+  printf '%s-%s' "$ver" "$((max+1))"
 }
 
 built_status() {
@@ -324,7 +379,7 @@ list_entries() {
   for e in "${ENTRIES[@]}"; do
     ver=$(entry_field "$e" 1); dir=$(entry_field "$e" 2); base=$(entry_field "$e" 3); data=$(entry_field "$e" 4)
     key=$(entry_key "$e"); role="$(state_role_of "$key")"
-    printf '  [%d] %-14s %-12s %-16s 检出: %s\n' "$i" "$ver" "$(built_status "$dir")" "$role" "$base"
+    printf '  [%d] %-20s %-12s %-16s 检出: %s\n' "$i" "$key" "$(built_status "$dir")" "$role" "$base"
     printf '       数据: %s (%s)\n' "$data" "$(data_state "$data")"
     i=$((i+1))
   done
@@ -341,16 +396,33 @@ clean_input() {
     | tr -cd '[:alnum:] /._~+@#-'
 }
 
-resolve_match() {  # 版本号/项目名/目录名 的片段匹配（不含路径、不含序号）
-  local arg="$1" found="" e ver dir base
+resolve_match() {  # 目标串 → 条目。**先全名精确**（含 -2 次号），再片段匹配
+  local arg="$1" found="" e ver base k
+  # 第一遍：精确匹配 键 / 版本 / 检出目录名。同版本多份时必须用次号点名
+  local -a exact=()
+  for e in "${ENTRIES[@]}"; do
+    ver=$(entry_field "$e" 1); base=$(entry_field "$e" 3); k=$(entry_key "$e")
+    if [ "$arg" = "$k" ] || [ "$arg" = "$ver" ] || [ "$arg" = "$base" ]; then
+      exact+=("$e")
+    fi
+  done
+  if [ "${#exact[@]}" -gt 1 ]; then
+    die "“$arg” 命中 ${#exact[@]} 份检出（同版本多份并存）。请用次号点名其中之一：
+$(for e in "${exact[@]}"; do printf '    %s   → %s\n' "$(entry_key "$e")" "$(entry_field "$e" 2)"; done)"
+  fi
+  if [ "${#exact[@]}" = "1" ]; then printf '%s\n' "${exact[0]}"; return 0; fi
+  # 第二遍：片段匹配（多命中仍报错，不替用户选）
   for e in "${ENTRIES[@]}"; do
     ver=$(entry_field "$e" 1); base=$(entry_field "$e" 3)
     if [[ "$ver" == *"$arg"* ]] || [[ "$base" == *"$arg"* ]]; then
-      [ -n "$found" ] && die "“$arg” 匹配到多个版本，请输入序号或用 list 看全名"
+      if [ -n "$found" ] && [ "$found" != "$e" ]; then
+        die "“$arg” 匹配到多份（同版本多份并存？）。请用 --list 看次号，或用序号/完整检出目录名
+$(for x in "${ENTRIES[@]}"; do printf '    %s\n' "$(entry_key "$x")"; done)"
+      fi
       found="$e"
     fi
   done
-  [ -n "$found" ] || die "未找到匹配 “$arg” 的版本/项目。可用：$(for e in "${ENTRIES[@]}"; do printf '%s ' "$(entry_field "$e" 1)"; done)（或给出完整检出路径）"
+  [ -n "$found" ] || die "未找到匹配 “$arg” 的版本/项目。可用：$(for e in "${ENTRIES[@]}"; do printf '%s ' "$(entry_key "$e")"; done)（或给出完整检出路径）"
   printf '%s\n' "$found"
 }
 
@@ -746,21 +818,29 @@ adopt_prompt() {
 
 # 把一个未管理检出纳入管理；输出最终条目（stdout 纯净；日志走 stderr）
 adopt_and_entry() {
-  local path="$1" mode="$2" ver base dest entry data
+  local path="$1" mode="$2" ver base dest entry data key other
   ver=$(read_version "$path"); base=$(basename "$path"); dest="$MANAGE_ROOT/$base"
+  # B7 扫重：同版本的又一份 → 分配次号（max+1，含墓碑，绝不重用），数据 home 用 <键>
+  path="$(readlink -f "$path")"
+  key="$(key_for_dir "$path" "$ver")"
+  other="$(state_kv_get "$key" dir)"
+  if [ -n "$other" ] && [ "$other" != "$path" ]; then
+    key="$(state_next_key "$ver")"
+    log "同版本第二份检出：分配次号 $key（数据 home $DATA_ROOT/$key，两份各自独立启动）" >&2
+  fi
   case "$mode" in
     iso )
       [ -e "$dest" ] && die "目标 $dest 已存在，请手动处理"
       log "移入管理目录: $path -> $dest" >&2
       mv "$path" "$dest"
-      data=$(printf '%s/%s' "$DATA_ROOT" "$ver")
+      data="$DATA_ROOT/$key"
       ENTRIES+=("$ver|$dest|$base|$data")
       printf '%s\n' "${ENTRIES[-1]}"
       ;;
     link )
-      data=$(printf '%s/%s' "$DATA_ROOT" "$ver")
+      data="$DATA_ROOT/$key"
       add_map_line "ext|$path|$data"
-      log "登记外部检出(本体不动): $path (数据 $data)" >&2
+      log "登记外部检出(本体不动): $path (键 $key，数据 $data)" >&2
       ENTRIES+=("$ver|$path|$base|$data")
       printf '%s\n' "${ENTRIES[-1]}"
       ;;
@@ -1399,6 +1479,9 @@ cmd_add() {  # add <路径> [--mode iso|link|body]
   fi
   adopt_and_entry "$path" "$mode" >/dev/null
   log '登记完成'
+  # B7：纳入管理即登记账本 —— 同版本的又一份会在这里拿到次号，并把数据 home 写进 .map
+  load_map; collect_entries; sort_entries 2>/dev/null || true
+  state_record_install "$path" || warn '登记到账本失败（rdsh state --init 可补）'
 }
 
 cmd_list() { list_entries; printf '\n共 %d 个。启动：rdsh <序号|版本|项目名|路径>\n' "${#ENTRIES[@]}"; }
@@ -1604,14 +1687,15 @@ snap_manifest() {  # <快照目录> <字段> → 值
   sed -nE "s/^$2=(.*)$/\1/p" "$1/MANIFEST.kv" 2>/dev/null | tail -1
 }
 
-snap_write_manifest() {  # <快照目录> <版本> <源> <模式> [link-dest]
-  local d="$1" ver="$2" src="$3" mode="$4" ld="${5:-}"
+snap_write_manifest() {  # <快照目录> <键> <版本> <源> <模式> [link-dest]
+  # 快照按**对象键**归档（不是版本号）：同版本多份（-2/-3）的备份绝不能混在一起
+  local d="$1" key="$2" ver="$3" src="$4" mode="$5" ld="${6:-}"
   local n sz
   n="$(snap_files "$d")"          # snap_files 已排除 MANIFEST.kv（别在这里再减 1）
   sz="$(du -sh "$d" 2>/dev/null | cut -f1 || echo '?')"
   ( umask 077
-    { printf 'version=%s\nat=%s\nsource=%s\nmode=%s\nlink_dest=%s\nfiles=%s\nsize=%s\n' \
-        "$ver" "$(date -Is)" "$src" "$mode" "$ld" "$n" "$sz"
+    { printf 'key=%s\nversion=%s\nat=%s\nsource=%s\nmode=%s\nlink_dest=%s\nfiles=%s\nsize=%s\n' \
+        "$key" "$ver" "$(date -Is)" "$src" "$mode" "$ld" "$n" "$sz"
     } > "$d/MANIFEST.kv" )
 }
 
@@ -1667,18 +1751,18 @@ snap_prune() {  # <版本> <保留份数>：超出的挪进回收站（永不 rm
   log "保留最新 $keep 份，其余已挪进回收站（rdsh trash ls 可还原）"
 }
 
-backup_one() {  # <版本> <源目录> <模式> [标签] [dry|live] → **stdout 只返回快照路径**
-  local ver="$1" src="$2" mode="$3" label="${4:-}" flag="${5:-live}"
+backup_one() {  # <键> <版本> <源目录> <模式> [标签] [dry|live] → **stdout 只返回快照路径**
+  local key="$1" ver="$2" src="$3" mode="$4" label="${5:-}" flag="${6:-live}"
   local dry=0; [ "$flag" = "dry" ] && dry=1
   # 注意：本函数的 **stdout 只用于返回快照路径**（会被 $( ) 捕获），
   # 所有叙述/进度必须走 stderr —— 否则日志会被吞进变量、路径也脏掉（本批踩到）。
   [ -d "$src" ] || { warn "源不存在，跳过：$src" >&2; return 1; }
   local dest_dir dest prev=""
-  dest_dir="$(snap_dir_of "$ver")"
+  dest_dir="$(snap_dir_of "$key")"
   dest="$dest_dir/$(backup_stamp)"
   local _k=2                      # 同一秒内连做两次 → 目录名会撞，加序号
   while [ -e "$dest" ]; do dest="$dest_dir/$(backup_stamp)-$_k"; _k=$((_k+1)); done
-  [ "$mode" = "snapshot" ] && prev="$(snap_latest "$ver")"
+  [ "$mode" = "snapshot" ] && prev="$(snap_latest "$key")"
   if [ "$dry" = "1" ]; then
     printf '  [dry-run] %s → %s（%s%s）\n' "$src" "$dest" "$mode" "${prev:+，硬链接基准 $(basename "$prev")}" >&2
     return 0
@@ -1688,20 +1772,20 @@ backup_one() {  # <版本> <源目录> <模式> [标签] [dry|live] → **stdout
   mkdir -p "$dest"
   if [ "$mode" = "snapshot" ]; then
     command -v rsync >/dev/null || { rmdir "$dest" 2>/dev/null || true; die '增量快照需要 rsync（没有它就用默认的全量备份）'; }
-    log "快照 $ver：rsync -a --delete${prev:+ --link-dest=$(basename "$prev")} …" >&2
+    log "快照 $key（版本 $ver）：rsync -a --delete${prev:+ --link-dest=$(basename "$prev")} …" >&2
     local -a args=(-a --delete)
     [ -n "$prev" ] && args+=(--link-dest="$prev")
     if ! rsync "${args[@]}" "$src/" "$dest/"; then
-      trash_mv --label "snapshot-failed-$ver" --reason 'rsync 失败的半成品' "$dest" || true
+      trash_mv --label "snapshot-failed-$key" --reason 'rsync 失败的半成品' "$dest" || true
       die "rsync 失败，半成品已挪进回收站：$dest"
     fi
   else
     if ! cp -a "$src/." "$dest/"; then
-      trash_mv --label "backup-failed-$ver" --reason 'cp 失败的半成品' "$dest" || true
+      trash_mv --label "backup-failed-$key" --reason 'cp 失败的半成品' "$dest" || true
       die "cp -a 失败，半成品已挪进回收站：$dest"
     fi
   fi
-  snap_write_manifest "$dest" "$ver" "$src" "$mode" "${prev:-}"
+  snap_write_manifest "$dest" "$key" "$ver" "$src" "$mode" "${prev:-}"
   # 「实际新增」= 版本目录 du 的差（du 在同一次遍历里对硬链接只算一次）——
   # 表观大小 `du -sh $dest` 会把与旧快照共享的硬链接也计入，直接报它会误导。
   local sz_after=0 added=0
@@ -1730,7 +1814,7 @@ backup_state() {  # [dry|live]：把状态账本快照到本地（不进仓库�
     trash_mv --label 'state-snapshot-failed' --reason 'cp 失败的半成品' "$dest" || true
     die "状态账本快照失败，半成品已挪进回收站：$dest"
   fi
-  snap_write_manifest "$dest" 'state' "$STATE_ROOT" 'full' ''
+  snap_write_manifest "$dest" 'state' 'state' "$STATE_ROOT" 'full' ''
   log "状态账本快照完成：$dest（$(du -sh "$dest" 2>/dev/null | cut -f1)）" >&2
   printf '%s\n' "$dest"
 }
@@ -1744,7 +1828,8 @@ backup_list() {  # [<版本>]
       [ -d "$d" ] || continue
       ver="$(basename "$d")"
       [ -n "$only" ] && [ "$ver" != "$only" ] && continue
-      printf '  %-16s %s 份  共 %s\n' "$ver" "$(du_count "$d"*/)" "$(du_size "$d")"
+      printf '  %-18s %s 份  共 %s%s\n' "$ver" "$(du_count "$d"*/)" "$(du_size "$d")" \
+        "$([ "$(snap_manifest "$(ls -1dt "$d"*/ 2>/dev/null | sed -n '1p')" version)" != "$ver" ] && printf '  版本 %s' "$(snap_manifest "$(ls -1dt "$d"*/ 2>/dev/null | sed -n '1p')" version)")"
       while IFS= read -r s; do
         [ -n "$s" ] || continue
         local ak show
@@ -1805,20 +1890,22 @@ cmd_backup() {
     for e in "${ENTRIES[@]:-}"; do
       [ -n "$e" ] || continue
       ver="$(entry_field "$e" 1)"; data="$(entry_field "$e" 4)"
-      [ -d "$data" ] || { warn "$ver：无数据目录，跳过"; continue; }
-      snap="$(backup_one "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
+      local ekey; ekey="$(entry_key "$e")"
+      [ -d "$data" ] || { warn "$ekey：无数据目录，跳过"; continue; }
+      snap="$(backup_one "$ekey" "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
       if [ "$verify" = "1" ] && [ -n "$snap" ] && [ -f "$snap/MANIFEST.kv" ]; then snap_verify "$snap" || failed=$((failed+1)); fi
-      if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ver" "$keep"; fi
+      if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ekey" "$keep"; fi
     done
   elif [ -n "$ver_arg" ]; then
     local entry; entry="$(resolve_target "$ver_arg")"
     [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理'
-    local ver data snap
+    local ver data snap ekey
     ver="$(entry_field "$entry" 1)"; data="$(entry_field "$entry" 4)"
+    ekey="$(entry_key "$entry")"
     [ -d "$data" ] || die "版本 $ver 尚无数据目录（$data）"
-    snap="$(backup_one "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
+    snap="$(backup_one "$ekey" "$ver" "$data" "$mode" "$label" "$([ "$dry" = "1" ] && echo dry || echo live)")" || failed=$((failed+1))
     if [ "$verify" = "1" ] && [ -n "$snap" ] && [ -f "$snap/MANIFEST.kv" ]; then snap_verify "$snap" || failed=$((failed+1)); fi
-    if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ver" "$keep"; fi
+    if [ -n "$keep" ] && [ "$dry" != "1" ]; then snap_prune "$ekey" "$keep"; fi
   fi
   [ "$failed" = "0" ] || { warn "$failed 项未完成"; return 1; }
 }
@@ -2090,11 +2177,22 @@ state_record_install() {  # <检出目录> [角色]：安装完成时登记（�
   local dir ver key role other inst built src
   dir="$(readlink -f "$1")"
   ver="$(read_version "$dir")"
-  key="$(state_key_for_dir "$dir")"; [ -n "$key" ] || key="$ver"
-  other="$(state_kv_get "$key" dir)"
+  key="$(key_for_dir "$dir" "$ver")"
+  local other; other="$(state_kv_get "$key" dir)"
   if [ -n "$other" ] && [ "$other" != "$dir" ]; then
-    warn "同版本第二份检出：账本键 $key 已指向 $other → 本次不覆盖（同版本共存的 -2 次号是 B7 的事）"
-    return 1
+    # 同版本的又一份：分配新次号（max+1，含墓碑；绝不重用编号）
+    local nk; nk="$(state_next_key "$ver")"
+    warn "同版本第二份检出：$ver 的键已被 $other 占用 → 本份分配次号 $nk"
+    key="$nk"
+    other="$(state_kv_get "$key" dir)"
+    if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+      warn "次号 $key 也已被占用（$other）→ 拒绝登记，请手工确认"
+      return 1
+    fi
+    # 显式登记数据目录映射：从此该检出用 $DATA_ROOT/<键>，不再与首份共用 home
+    local dhome="$DATA_ROOT/$key"
+    add_map_line "dir|$(basename "$dir")|$dhome"
+    warn "  数据 home：$dhome（已写入 $MAP_FILE 的 dir 行）；两份检出**各自独立启动**"
   fi
   role="${2:-}"
   if [ -z "$role" ]; then
@@ -2275,13 +2373,27 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     dir="$(readlink -f "$(entry_field "$e" 2)")"
     ver="$(entry_field "$e" 1)"
     key="$(entry_key "$e")"
-    if state_kv_has "$key"; then
+    local data_override=""
+    # 注意：不能只看"键有没有行"——要看**这一行是不是本检出**。
+    # 同版本第二份的键与首份相同（都从版本号起算），只看"行存在"会把它误判成"已登记"而跳过。
+    local kdir; kdir="$(state_kv_get "$key" dir)"
+    if [ -n "$kdir" ] && [ "$kdir" = "$dir" ]; then
       printf '  已登记  %-18s %s\n' "$key" "$dir"; registered=$((registered+1)); continue
     fi
-    local other; other="$(state_kv_get "$key" dir)"
+    # B7 扫重：键已被别的检出占用 → 这是同版本的又一份，分配次号（max+1，含墓碑，绝不重用）
+    local other; other="$kdir"
     if [ -n "$other" ] && [ "$other" != "$dir" ]; then
-      warn "同版本第二份检出：键 $key 已指向 $other → 跳过 $dir（-2 次号是 B7 的事）"
-      dup=$((dup+1)); continue
+      local nk; nk="$(state_next_key "$ver")"
+      warn "同版本第二份检出：$ver 的键已被 $other 占用 → 分配次号 $nk"
+      key="$nk"
+      other="$(state_kv_get "$key" dir)"
+      if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+        warn "次号 $key 也被占用（$other）→ 跳过 $dir"; dup=$((dup+1)); continue
+      fi
+      local dhome="$DATA_ROOT/$key"
+      add_map_line "dir|$(basename "$dir")|$dhome"
+      warn "  数据 home：$dhome（已写进 $MAP_FILE 的 dir 行）"
+      data_override="$dhome"
     fi
     local inst built src com
     if [ -f "$dir/.installed" ]; then
@@ -2304,7 +2416,8 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     state_kv_set "$key" source "$src"
     state_kv_set "$key" commit "$com"
     state_kv_set "$key" dir "$dir"
-    state_kv_set "$key" data "$(state_data_for_dir "$dir")"
+    # 同版本第二份刚拿到次号时，data 必须是**新键**的 home（ENTRIES 是登记前的缓存，会指向首份）
+    state_kv_set "$key" data "${data_override:-$(state_data_for_dir "$dir")}"
     state_kv_set "$key" role installed
     state_kv_set "$key" note '由 state --init 播种'
     state_git_exclude "$dir"
@@ -2856,17 +2969,28 @@ md_merge_append() {  # <源> <目标>：把源里目标没有的 ## 块**追加*
   log "  + $(basename "$dst")：追加了 $n 条"
 }
 
-restore_resolve_ver() {  # <版本片段> → 账本/快照里的确切版本键
+restore_resolve_ver() {  # <版本片段|键> → 快照/账本里的确切**对象键**
+  # 同版本多份时用 -2/-3 次号点名；片段命中多份就报错（不替用户选）
   local want="$1" e k hit="" n=0
   [ -n "$want" ] || return 0
   if [ "${#ENTRIES[@]}" -gt 0 ]; then
     e="$(resolve_target "$want" 2>/dev/null || true)"
     case "$e" in UNMANAGED:*|"") ;; *) entry_key "$e"; return 0 ;; esac
   fi
+  local -a cands=()
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    case "$k" in "$want") cands+=("$k") ;; esac
+  done < <(state_keys)
+  [ "${#cands[@]}" = "1" ] && { printf '%s' "${cands[0]}"; return 0; }
   while IFS= read -r k; do
     [ -n "$k" ] || continue
     case "$k" in *"$want"*) hit="$k"; n=$((n+1)) ;; esac
   done < <(state_keys)
+  if [ "$n" -gt 1 ]; then
+    warn "“$want” 命中 $n 个对象（同版本多份？）：$(state_keys | tr '\n' ' ')" >&2
+    return 1
+  fi
   [ "$n" = "1" ] && { printf '%s' "$hit"; return 0; }
   printf '%s' "$want"
 }
@@ -2993,13 +3117,16 @@ cmd_restore() {
   local src_is_snap=0
   if [ -f "$from/MANIFEST.kv" ]; then
     src_is_snap=1
-    local mver; mver="$(snap_manifest "$from" version)"
+    local mver mkey; mver="$(snap_manifest "$from" version)"; mkey="$(snap_manifest "$from" key)"
     if [ "$mver" = "state" ]; then
       [ "$type" = "state" ] || die "该快照是状态账本快照（version=state）→ 用 --type state"
     else
       case "$type" in
-        data|state) [ -n "$ver" ] || ver="$mver" ;;
-        *) die "该快照是数据 home 快照（版本 $mver）→ 用 --type data" ;;
+        data|state)
+          # **用快照里的对象键**定位数据 home：同版本多份（-2/-3）时这才分得开
+          [ -n "$ver" ] || ver="${mkey:-$mver}"
+          ;;
+        *) die "该快照是数据 home 快照（键 ${mkey:-$mver}）→ 用 --type data" ;;
       esac
     fi
   else
@@ -3380,9 +3507,17 @@ cmd_fetch() {
 
   [ -n "$ver" ] || die '用法: rdsh fetch <版本>（用 rdsh fetch --list 看可选）'
   local tag="$TAG_PREFIX$ver"
-  # 本地检查先做：目标已存在就不必联网
-  local target="$MANAGE_ROOT/${dirname:-deepseek-harness-dsh-$ver}"
-  [ -e "$target" ] && die "目标已存在：$target（改名/移走，或用 --dir 换个名字）"
+  # 本地检查先做：目标已存在就不必联网。
+  # 同版本再次 fetch = 同版本共存（B7）：默认目录名撞车时**自动加次号**（max+1，含墓碑，绝不重用）
+  local base_name="${dirname:-deepseek-harness-dsh-$ver}"
+  local target="$MANAGE_ROOT/$base_name" ord=""
+  if [ -e "$target" ]; then
+    ord="$(state_next_key "$ver")"; ord="${ord##*-}"
+    target="$MANAGE_ROOT/$base_name-$ord"
+    warn "同版本已有一份检出 → 本次按次号命名：$(basename "$target")"
+    warn "  两份检出**各自独立启动**；次号在 rdsh install 时写入账本，数据 home 会自动分开"
+    [ -e "$target" ] && die "目标已存在：$target（改名/移走，或用 --dir 换个名字）"
+  fi
 
   local tags; tags="$(all_remote_tags)"
   if ! printf '%s\n' "$tags" | grep -qx "$ver"; then
@@ -3431,6 +3566,20 @@ cmd_fetch() {
   else
     log "校验通过：$target（版本 $got）"
   fi
+  # 同版本共存的可见性 + 溯源核对：同版本不同 commit = tag 漂移（值得知道）
+  local e_other ekey_other ocommit ncommit
+  ncommit="$(state_commit_of "$target")"
+  for e_other in "${ENTRIES[@]:-}"; do
+    [ -n "$e_other" ] || continue
+    [ "$(read_version "$(entry_field "$e_other" 2)")" = "$ver" ] || continue
+    [ "$(readlink -f "$(entry_field "$e_other" 2)")" = "$(readlink -f "$target")" ] && continue
+    ekey_other="$(entry_key "$e_other")"
+    ocommit="$(state_commit_of "$(entry_field "$e_other" 2)")"
+    warn "同版本已存在：$ekey_other（$(entry_field "$e_other" 2)）→ 本份将在 install 时分配下一个次号"
+    if [ -n "$ncommit" ] && [ -n "$ocommit" ] && [ "$ncommit" != "$ocommit" ]; then
+      warn "  ⚠️ 同版本不同 commit：新 $ncommit vs 旧 $ocommit —— tag 可能被重打过，建议核对"
+    fi
+  done
   log "下一步：rdsh install $ver（pnpm install + build，较慢）"
   if [ "$do_install" = "1" ]; then
     load_map; collect_entries; sort_entries   # 让新检出进入清单
