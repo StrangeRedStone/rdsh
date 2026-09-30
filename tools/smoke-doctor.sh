@@ -30,9 +30,17 @@ mkdir -p "$B/dsh" "$B/.dsh-backup" "$B/.dsh-suite"
 cp -p "$SRC" "$B/dsh/doctor.sh"
 [ -f "$RD_SH" ] && cp -p "$RD_SH" "$B/dsh/Rdsh.sh"
 
+# 入口链维（B11）会看 $HOME 里的 rdsh 命令/桌面图标 —— 那是**真机状态**，
+# 本冒烟的"健康环境"必须自带一套隔离入口，否则在干净 HOME（CI/新机器）下会多出 warn。
+ER="$T/entryroot"; mkdir -p "$ER/.local/bin" "$ER/.local/share/applications"
+ln -sfn "$B/dsh/Rdsh.sh" "$ER/.local/bin/rdsh"
+printf '[Desktop Entry]\nName=Deepseek Harness\nExec=%s\nType=Application\n' "$ER/.local/bin/rdsh" > "$ER/.local/share/applications/dsh.desktop"
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR \
+          RDSH_ENTRY_ROOT="$ER" RDSH_ENTRY_BIN_DIR="$ER/.local/bin" \
+          RDSH_ENTRY_DESKTOP="$ER/.local/share/applications/dsh.desktop" \
+          PATH="$ER/.local/bin:$PATH" \
           RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/doctor.sh" "$@" </dev/null; }
 # 造检出 + 数据 home（版本号避开真机在跑版本，防止宿主状态混入）
 mkck() { # <目录名> <版本>

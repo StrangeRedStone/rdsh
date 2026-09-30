@@ -144,6 +144,11 @@ N2="$(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))["capabi
 has "$TXT" '风险等级' '人类可读版说明了风险等级与默认参数约定'
 
 echo '--- 8) 真机 restart --dry-run：在跑的实例 PID 必须不变 ---'
+# 这一节说的是**真机**：干净 HOME（CI / 新机器）下真机路径不存在 → 明确跳过，不算失败
+if [ ! -f "$HOME/Mapp/dsh/Rdsh.sh" ]; then
+  echo '  --   跳过（本 HOME 下没有 $HOME/Mapp/dsh/Rdsh.sh —— CI/干净环境属正常）'
+  pid3080() { :; }
+else
 pid3080() { ss -ltnp 2>/dev/null | grep -F ':3080' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
 P0="$(pid3080)"
 if [ -n "$P0" ]; then
@@ -157,6 +162,7 @@ if [ -n "$P0" ]; then
   has "$(cat "$T/restart-dry.log" 2>/dev/null)" '未做任何改动' '日志里明确写了"未做任何改动"'
 else
   ok '跳过（:3080 上没有实例）'
+fi
 fi
 
 echo '--- 9) 真机资产未被触碰 ---'

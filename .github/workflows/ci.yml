@@ -47,6 +47,9 @@ jobs:
           set -e
           bash tools/smoke-state.sh ./Rdsh.sh
 
+      # 本地等价（推之前请跑一遍，2026-09-30 CI 就是在这儿翻的车）：
+      #   for f in tools/smoke-*.sh; do HOME="$(mktemp -d)" bash "$f" ./Rdsh.sh; done
+      # 干净 HOME 能暴露"夹具偷偷依赖真机状态"：入口链维、真机 restart/PID 断言、真机备份根路径…
       - name: 功能冒烟（隔离 BASE：doctor 只读体检）
         run: |
           set -e
