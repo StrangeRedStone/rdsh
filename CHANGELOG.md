@@ -47,7 +47,7 @@
   （`现有指向 X；要换加 --force`），入口没落成时以**退出码 4** 明确收尾（其余步骤照跑，让用户看到全貌）；
   `--force` 才替换。事故经过：`smoke-bootstrap` 第一版没隔离 `--bin-dir`（默认 `$HOME/.local/bin`），
   **在真机上把 `~/.local/bin/rdsh` 指到了临时目录**；随后又被当成"测试残留"收进回收站 ——
-  于是 `rdsh` 命令消失、`dsh.desktop` 的 `Exec=/home/srs/.local/bin/rdsh` 失效（图标也就"不见了"）。
+  于是 `rdsh` 命令消失、`dsh.desktop` 的 `Exec=~/.local/bin/rdsh` 失效（图标也就"不见了"）。
   入口已按文档记载的原形态重建（`~/.local/bin/rdsh` → `~/Mapp/dsh/Rdsh.sh`，并补 `<检出>/rdsh`）。
 - **`trash restore --dry-run` 会改清单**：干跑路径仍往里追加了 `restored_at=`（真机那次追加了 3 行）。
   干跑**一个字节都不该写**。已修，并加了"dry-run 前后清单 md5 一致"的断言。
