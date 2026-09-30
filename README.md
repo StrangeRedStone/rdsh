@@ -44,6 +44,8 @@
 | `rdsh wake ls\|show <会话id>` | **只读**看唤醒台账：重启后要续转哪些会话（目录 `<数据 home>/wake/<会话id>.json`） |
 | `rdsh state rebind <旧路径\|键> <新路径>` | 检出名改了/挪了 → 把账本身份**重绑**到新路径（不新建编号）；`--dry-run` 先看 |
 | `rdsh state rename <目标> [<新名>] [--apply]` | **目录名规范化**：`mv` + 账本 + `.map` + 实例注册表一次改齐（默认 dry-run；同级同名会拒绝） |
+| `rdsh restart --wake <提示词> --session <会话id>` | 重启**并在重启前登记"重启后继续做什么"**（无人值守时 rdsh-restart.sh 接手） |
+| `rdsh wake add <会话id> <提示词>` / `rdsh wake del <会话id>` | 唤醒台账登记/撤销（`del` 移进回收站；都支持 `--dry-run`） |
 | `rdsh doctor --only entry` | **入口链自检**：PATH 里的 `rdsh`、`<检出>/rdsh`、桌面图标 `Exec`、入口目录是否在 PATH；断哪条给修复命令 |
 | `rdsh doctor --fix-links [--apply]` | 断链**分类 + 重指**：①挂回本 home 自己的检出 ②同版本兄弟目录 ③无法判定；先写备份清单（可逐条还原），默认 dry-run |
 | `rdsh settings show\|keys\|carry\|register` | **settings.yaml 的查看 / 携带 / 登记**：`carry` 是 **schema 感知**合并（同名键取源值、目标独有键保留、源独有键附带并告警），旧文件先进回收站；登记会写路径 + sha 指纹进账本 |
@@ -189,6 +191,17 @@ DSH_HOME=~/Mapp/.dsh-suite/data/<对象键> pnpm dsh web --port 3080
 - 自查入口链：`rdsh doctor --only entry`（rdsh 命令、`<检出>/rdsh`、桌面图标 `Exec`、PATH）
 - 把 rdsh 装回来：`bash bootstrap.sh`（联网）或 `bash bootstrap.sh --from <目录|tarball>`（离线）
 - 完整版：[docs/应急启动.md](docs/应急启动.md)（机器上也有一份 `~/Mapp/dsh/应急启动.md`）
+
+## 一个门面（0.9.2 起）
+
+**agent 表面只有一个**：插件 `rdsh-bridge` 读 `rdsh bridge --spec --json` 的能力清单，一个能力注册一个工具。
+加一个 rdsh 子命令**不用改插件**——这是"门面可扩展"的全部含义。
+
+- 危险能力的默认由契约定死：`write` 带 `--dry-run`、`destructive` 只出计划；
+  真要动手传 **`live:true`**（去掉安全默认），`destructive` 还要 **`confirm:true`**。
+- `reboot` 插件**不再**注册 `dsh_restart` 工具（避免两个等价工具=两个头），只保留两件必须在进程内的事：
+  boot 时消费唤醒台账、用户命令 `/restart`（侧栏按钮依赖）。要回退旧行为：在 `cordis.patch.yml`
+  的 reboot 条目加 `config: { exposeTool: true }` 后重启。
 
 ## 能力与界面的分层（作法，0.7.0 起）
 

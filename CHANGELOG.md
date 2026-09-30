@@ -2,6 +2,37 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.9.2 — 2026-09-30
+
+> 主题：**一个门面**（用户要求「rdsh 功能全部集成到一个门面，不要两个头，门面要可扩展」）。
+> 写这批时又抓出门面一个**真缺陷**：契约给 write/destructive 装了安全默认（`--dry-run`），
+> 而门面只会**追加**参数 → `--dry-run` 撤不掉 → `rdsh_backup`/`rdsh_restore`/`rdsh_restart` **永远只能干跑**。
+
+### 新增
+
+- **`rdsh restart --wake <提示词> --session <会话id>`**：重启前把"重启后继续做什么"写进唤醒台账
+  （JSON 由 `jq` 生成，提示词含引号/换行也原样往返）——**门面一个工具即可驱动"重启 + 续转"**，不需要第二个插件表面。
+- **`rdsh wake add|del`**：从"只读看台账"升级为可登记/可撤；`del` **移进回收站**（不 rm）；两者都支持 `--dry-run`。
+- **门面 `live` 开关**（插件侧）：`live:true` 才去掉契约的安全默认；`destructive` 能力用 `live` 时必须 `confirm:true`
+  —— 两层闸门（先想清楚、再动手），默认永远先给计划。
+- `RDSH_NO_LIVE_INSTANCES=1`：隔离 `ss` 真相层的**测试缝**（隔离 BASE 的冒烟藏不住真机在跑实例，实测因此把台账写进真机 home 两次）。
+- `tools/smoke-wake.sh`（**29 项断言**）：JSON 往返、账本回退、`restart --wake`、缺参拒绝、`del` 进回收站、dry-run、**真机台账目录前后逐项一致**。
+
+### 修复
+
+- **`bridge --spec --json` 转义**：契约文案里一个直引号就会产出**非法 JSON**（smoke-bridge 抓出，还连带拖挂 bootstrap 的 selfupdate）。
+  生成器改用 `jq` 构造（字段里的引号/反斜杠/换行都被正确转义），手写契约再也炸不了 JSON。
+- **`wake add/del` 补 `--dry-run`**：新能力标了 `write` 却没安全默认 → 被契约自检抓住（"write 必须默认只出计划"是 rdsh 的规矩，不能为过检查而绕过）。
+- `restart` 归到"会加载 entries"的命令组（否则 `--wake <目标>` 解析不到目标）；`wake_home_for_target` 回退顺序改为
+  **显式目标 → 账本 current → 在跑实例** 并打印来源（隔离环境里不会再漏进真机）。
+
+### 作法（同步进文档）
+
+- **agent 表面只在门面**：`reboot` 插件不再注册 `dsh_restart` 工具（改为**加载期配置** `exposeTool`，默认 false；
+  在 `cordis.patch.yml` 的 reboot 条目加 `config: { exposeTool: true }` 可回退），只保留两件**必须进程内**的事：
+  boot 时消费唤醒台账、用户命令 `/restart`（侧栏按钮依赖）。
+- 加一个 rdsh 子命令**不用改插件**（契约驱动）——这就是"门面可扩展"。
+
 ## 0.9.1 — 2026-09-30
 
 > 起因：用户指出「因为 rdsh 接管了 dsh，旧有的启动方式在这里失效了。我们在 rdsh 项目总是默认 rdsh 健全地存在，但实际可能不总是这样」——

@@ -570,7 +570,10 @@ registry_retire() {  # <端口>：把注册表里的死条目挪到 stale/（永
 }
 
 # 活实例 = 真相 ∪ 注解。每行：port|pid|ver|dir|data|kind|id|unit|started
-instances_live() {
+instances_live() {  # 真相层：ss + /proc（**测试可用 RDSH_NO_LIVE_INSTANCES=1 关闭**）
+  # 为什么要这个缝：`ss` 看的是**真机**，隔离 BASE 的冒烟藏不住它 ——
+  # 实测因此把唤醒台账写进了真机 home。测试里请置 RDSH_NO_LIVE_INSTANCES=1。
+  if [ "${RDSH_NO_LIVE_INSTANCES:-0}" = "1" ]; then return 0; fi
   local p pid dir data ver kind id unit started f seen=""
   for p in $(listening_ports); do
     pid="$(port_pid "$p")"
@@ -4002,13 +4005,14 @@ rdsh_state|state list||read||看状态账本：每个对象的角色、安装时
 rdsh_scan|scan|--path <目录> / --files <文件…>|read||隐私守卫（私钥/令牌/凭据/会话数据 error；家目录/邮箱/大文件 warn）
 rdsh_settings|settings show||read||看各版本 settings.yaml 的路径、顶层键、与账本指纹是否一致
 rdsh_wake|wake ls||read||看唤醒台账：重启后会续转哪些会话
+rdsh_wake_set|wake add|wake add <会话id> <提示词> [--target <版本>] / wake del <会话id>|write|--dry-run|登记/撤销「重启后继续做什么」（供门面在重启前登记续转）
 rdsh_du|du||read||磁盘台账：各版本/数据/快照/回收站占了多少（不动手）
 rdsh_backup|backup|<目标…> [--snapshot] [--dry-run]|write|--dry-run|数据 home 快照/备份（硬链接增量）；默认 dry-run，去掉 --dry-run 才落盘
 rdsh_restore|restore|<目标> [--type data/assets/state] [--list] [--dry-run]|write|--dry-run|从快照/回收站/git 恢复；先挪后写，默认 dry-run
 rdsh_trash_ls|trash ls||read||看回收站条目（时间/标签/体积/原因/原路径/是否已还原）
 rdsh_trash_restore|trash restore|--last / <条目名> [--force]|write|--last --dry-run|按清单整份还原（退役与恢复的后路）；目标已存在会跳过，--force 才腾位
 rdsh_retire|retire|<目标…> [--apply] [--force]|destructive||退役一个版本（五类足迹）；**默认只出计划**，--apply 才动，--force 才碰回退基线/最后一版
-rdsh_restart|restart|[<目标>] [--dry-run] [--probe]|destructive|--dry-run|重启当前 dsh（转发 rdsh-restart.sh）；默认 dry-run，真重启要显式去掉
+rdsh_restart|restart|[<目标>] [--dry-run] [--probe] [--wake <提示词>] [--session <会话id>]|destructive|--dry-run|重启当前 dsh（转发 rdsh-restart.sh）；--wake + --session 会在重启前登记「重启后继续做什么」；默认 dry-run，真重启要显式去掉
 ROWS
 }
 
@@ -4033,23 +4037,23 @@ cmd_bridge() {
         [ "$nf" = "6" ] || die "bridge 契约格式错误：期望 6 字段，实际 $nf —— $_row"
       done < <(bridge_spec_rows)
       if [ "$json" = "1" ]; then
-        printf '{\n'
-        printf '  "version": %s,\n' "$BRIDGE_SPEC_VERSION"
-        printf '  "tool": "rdsh",\n'
-        printf '  "entry": "%s",\n' "$MANAGE_ROOT/Rdsh.sh"
-        printf '  "manage_root": "%s",\n' "$MANAGE_ROOT"
-        printf '  "base": "%s",\n' "$BASE"
-        printf '  "note": "插件只做门面：读本清单注册工具，调用时执行 bash <entry> <subcommand> [args]。危险能力在 spec 里已标好默认 dry-run 与是否需要显式 apply。",\n'
-        printf '  "capabilities": [\n'
-        local first=1
-        while IFS='|' read -r id sc args risk def summary; do
-          [ -n "$id" ] || continue
-          [ "$first" = "1" ] || printf ',\n'
-          first=0
-          printf '    { "id": "%s", "subcommand": "%s", "args": "%s", "risk": "%s", "default_args": "%s", "summary": "%s" }' \
-            "$id" "$sc" "$args" "$risk" "$def" "$summary"
-        done < <(bridge_spec_rows)
-        printf '\n  ]\n}\n'
+        # 用 jq 构造（**不要**用 printf 拼 JSON）：手写契约里的引号/反斜杠/换行都会被正确转义。
+        # 2026-09-30：原先 printf 拼接时，契约文案里一个直引号就产出非法 JSON（smoke-bridge 抓出）。
+        if ! command -v jq >/dev/null 2>&1; then
+          die 'jq 是 rdsh 的依赖项（bridge --spec --json 用它保证转义正确）'
+        fi
+        local caps_json
+        caps_json="$(while IFS='|' read -r id sc args risk def summary; do
+            [ -n "$id" ] || continue
+            jq -cn --arg id "$id" --arg sc "$sc" --arg args "$args" --arg risk "$risk" \
+                   --arg def "$def" --arg summary "$summary" \
+              '{id:$id, subcommand:$sc, args:$args, risk:$risk, default_args:$def, summary:$summary}'
+          done < <(bridge_spec_rows) | jq -s '.')" || die '生成能力清单失败（bridge_spec_rows 输出异常？）'
+        jq -n --argjson ver "$BRIDGE_SPEC_VERSION" \
+              --arg entry "$MANAGE_ROOT/Rdsh.sh" --arg root "$MANAGE_ROOT" --arg base "$BASE" \
+              --arg note '插件只做门面：读本清单注册工具，调用时执行 bash <entry> <subcommand> [args]。危险能力在 spec 里已标好默认 dry-run 与是否需要显式 apply。' \
+              --argjson caps "$caps_json" \
+          '{version:$ver, tool:"rdsh", entry:$entry, manage_root:$root, base:$base, note:$note, capabilities:$caps}'
       else
         log "rdsh 门面契约 v$BRIDGE_SPEC_VERSION（机器可读版：rdsh bridge --spec --json）"
         printf '  %-16s %-14s %-9s %s\n' '能力 id' '子命令' '风险' '默认参数'
@@ -4087,19 +4091,97 @@ USAGE
 #   于是不依赖 dsh 也能重启、也能看清"重启后要续转什么"。
 WAKES_DIR_NAME="wake"     # 与 reboot 插件约定的台账目录：<数据 home>/wake/<sessionId>.json
 
+# ---- 唤醒台账的写入/撤销（B13：把"重启 + 续转"完整收进 rdsh，门面只需要一个头）
+wake_dir_of() {  # <数据 home> → 台账目录
+  printf '%s/wake' "${1%/}"
+}
+
+wake_last_result=""
+wake_last_error=""
+wake_write() {  # <数据 home> <会话id> <提示词> <原因> <登记人> → 0/1（结果在 $wake_last_*）
+  local data="$1" sid="$2" prompt="$3" reason="${4:-manual}" who="${5:-rdsh}"
+  wake_last_result=""; wake_last_error=""
+  if [ -z "$data" ] || [ -z "$sid" ] || [ -z "$prompt" ]; then
+    wake_last_error="参数不全（data/session/prompt 都要）"; return 1
+  fi
+  local d; d="$(wake_dir_of "$data")"
+  mkdir -p "$d" || { wake_last_error="建不了台账目录：$d"; return 1; }
+  chmod 700 "$d" 2>/dev/null || true
+  local file="$d/$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_').json"
+  local now; now="$(date +%s)000"
+  local tmp="$file.tmp.$$"
+  # 用 jq 生成 JSON（rdsh 已依赖 jq）：**手写转义太脆**，提示词里一个引号就能写坏台账
+  command -v jq >/dev/null 2>&1 || { wake_last_error='需要 jq 来写台账（rdsh 依赖项）'; return 1; }
+  if ( umask 077; jq -cn --arg sid "$sid" --arg prompt "$prompt" --arg reason "$reason" --arg who "$who"         --argjson now "$now"         '{version:1, sessionId:$sid, prompt:$prompt, reason:$reason, createdAt:$now,
+          maxAttempts:3, attempts:0, createdBy:$who}' > "$tmp" ); then
+    mv -f "$tmp" "$file" || { wake_last_error="写台账失败：$file"; return 1; }
+    wake_last_result="$file"
+    return 0
+  fi
+  wake_last_error="写台账失败：$file"
+  return 1
+}
+
+wake_remove() {  # <数据 home> <会话id|文件> → 0/1（**移进回收站**，不 rm）
+  local data="$1" sid="$2" d file
+  d="$(wake_dir_of "$data")"
+  if [ -e "$sid" ]; then file="$sid"; else
+    file="$d/$(printf '%s' "$sid" | tr -c 'A-Za-z0-9._-' '_').json"
+  fi
+  if [ ! -e "$file" ]; then wake_last_error="台账里没有：$file"; return 1; fi
+  if trash_mv --label "wake-$(basename "$file" .json)" --reason "从唤醒台账撤销（rdsh wake del）" "$file" >/dev/null 2>&1; then
+    wake_last_result="$file"; return 0
+  fi
+  wake_last_error="撤不动（回收站失败）：$file"; return 1
+}
+
+json_escape() {  # 仅用于极少数非 jq 场合的兜底（台账走 jq）
+  printf '%s' "$1"
+}
+
+wake_home_for_target() {  # [<目标>] → 数据 home；来源会打到 stderr（可追溯）
+  # 回退顺序（2026-09-30 修）：显式目标 → **账本 current** → 在跑实例。
+  # 为什么把账本放前面：隔离环境里账本也是隔离的，而 `instances_live` 读的是 `ss`（真机真相层，
+  # 隔离不掉）—— 顺序错了就会把台账写进真机 home（实测踩过）。
+  local who="${1:-}" e
+  if [ -n "$who" ]; then
+    e="$(resolve_target "$who" 2>/dev/null || true)"
+    case "$e" in
+      UNMANAGED:*|"") : ;;
+      *) log "  唤醒台账目标：$who → $(entry_field "$e" 4)（显式目标）" >&2; entry_field "$e" 4; return 0 ;;
+    esac
+  fi
+  local k; k="$(state_current_key 2>/dev/null || true)"
+  if [ -n "$k" ]; then
+    local kd; kd="$(state_kv_get "$k" data)"
+    [ -n "$kd" ] && { log "  唤醒台账目标：$k → $kd（账本 current）" >&2; printf '%s' "$kd"; return 0; }
+  fi
+  local row; row="$(instances_live | sed -n '1p')"
+  if [ -n "$row" ]; then
+    local _p _pid _v _d data _k _i _u _s
+    IFS='|' read -r _p _pid _v _d data _k _i _u _s <<< "$row"
+    [ -n "$data" ] && { log "  唤醒台账目标：在跑实例 → $data" >&2; printf '%s' "$data"; return 0; }
+  fi
+  return 1
+}
+
 cmd_restart() {
-  local log="" a
+  local log="" a wake_text="" wake_sid="" wake_target=""
   local -a pass=()
   while [ $# -gt 0 ]; do
     a="$1"
     case "$a" in
+      --wake) shift; wake_text="${1:-}" ;;
+      --wake=*) wake_text="${a#--wake=}" ;;
+      --session) shift; wake_sid="${1:-}" ;;
+      --session=*) wake_sid="${a#--session=}" ;;
       --log) shift; log="${1:-}" ;;
       --log=*) log="${a#--log=}" ;;
       --dry-run|-n|--probe|--force|--no-detach) pass+=("$a") ;;
       --delay|--timeout) pass+=("$a"); shift; pass+=("${1:-}") ;;
       --delay=*|--timeout=*) pass+=("$a") ;;
       -*) die "未知选项：$a（rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--timeout N] [--force] [--no-detach] [--log <文件>]）" ;;
-      *) pass+=("$a") ;;
+      *) pass+=("$a"); [ -z "$wake_target" ] && wake_target="$a" ;;
     esac
     shift || true
   done
@@ -4111,6 +4193,22 @@ cmd_restart() {
   local deflog="$LOG_DIR/restart-$(date +%Y%m%d-%H%M%S).log"
   [ -f "$(dirname "$deflog")" ] || mkdir -p "$(dirname "$deflog")" 2>/dev/null || true
   local uselog="${log:-$deflog}"
+  # --wake：重启前登记"重启后要继续做什么"（门面一个工具即可驱动"重启 + 续转"）
+  if [ -n "$wake_text" ]; then
+    [ -n "$wake_sid" ] || die '--wake 需要同时给 --session <会话id>（续转要指名会话）'
+    local wdata=""
+    # 目标要取"第一个非选项参数"（--dry-run/--probe 等也会进 pass，pass[0] 未必是目标）
+    wdata="$(wake_home_for_target "$wake_target" 2>/dev/null || true)"
+    if [ -z "$wdata" ]; then
+      # 登记失败**不阻塞重启**（重启才是这条命令的主职责）
+      warn "找不到数据 home（未给版本目标、也没有在跑实例）→ 跳过唤醒登记，重启照常"
+    elif wake_write "$wdata" "$wake_sid" "$wake_text" "restart" "rdsh restart --wake"; then
+      log "已登记唤醒台账：$wake_last_result（重启后由 boot 钩子消费；无人值守时 rdsh-restart.sh 接手）"
+      state_journal wake "$wake_sid" "重启前登记：$wake_last_result"
+    else
+      warn "唤醒登记失败：$wake_last_error（重启照常进行）"
+    fi
+  fi
   log "转发到 $script（真正的重启逻辑在那；本命令只是 rdsh 的统一入口）"
   log "输出落点：$uselog"
   local rc=0
@@ -4154,6 +4252,67 @@ cmd_wake() {
       [ "$n" = "0" ] && printf '  （空）\n'
       printf '  台账落点：<数据 home>/%s/<会话id>.json\n' "$WAKES_DIR_NAME"
       ;;
+    add)
+      # rdsh wake add <会话id> <提示词> [--target <版本>] [--reason <文字>] [--dry-run]
+      local sid="" prompt="" who="" reason="manual" dry=0
+      local -a rest=()
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --target) shift; who="${1:-}" ;;
+          --target=*) who="${1#--target=}" ;;
+          --reason) shift; reason="${1:-}" ;;
+          --reason=*) reason="${1#--reason=}" ;;
+          --dry-run|-n) dry=1 ;;
+          -*) die "未知选项：$1（rdsh wake add <会话id> <提示词> [--target <版本>] [--reason <文字>] [--dry-run]）" ;;
+          *) rest+=("$1") ;;
+        esac
+        shift || true
+      done
+      sid="${rest[0]:-}"; prompt="${rest[1]:-}"
+      [ -n "$sid" ] && [ -n "$prompt" ] || die '用法: rdsh wake add <会话id> <提示词> [--target <版本>] [--reason <文字>] [--dry-run]'
+      local data; data="$(wake_home_for_target "$who")" || die '找不到数据 home（用 --target <版本> 指定）'
+      if [ "$dry" = "1" ]; then
+        log "[dry-run] 将登记唤醒（不落盘）："
+        log "  数据 home：$data"
+        log "  会话：$sid   原因：$reason"
+        log "  提示词：$prompt"
+        log "  执行：rdsh wake add $(printf '%q ' "$sid" "$prompt")（去掉 --dry-run）"
+        return 0
+      fi
+      if wake_write "$data" "$sid" "$prompt" "$reason" "rdsh wake add"; then
+        log "已登记唤醒：$wake_last_result"
+        log "  该数据 home 的 boot 钩子（reboot 插件）会在下次启动消费它；无人值守时 rdsh-restart.sh 也会接手"
+        state_journal wake "$sid" "登记（$reason）：$wake_last_result"
+      else
+        die "登记失败：$wake_last_error"
+      fi
+      ;;
+    del|remove|rm)
+      local sid="${1:-}" who="" dry=0
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --target) shift; who="${1:-}" ;;
+          --target=*) who="${1#--target=}" ;;
+          --dry-run|-n) dry=1 ;;
+          -*) : ;;
+          *) [ -z "$sid" ] && sid="$1" ;;
+        esac
+        shift || true
+      done
+      [ -n "$sid" ] || die '用法: rdsh wake del <会话id|台账文件> [--target <版本>] [--dry-run]'
+      local data2; data2="$(wake_home_for_target "$who")" || die '找不到数据 home（用 --target <版本> 指定）'
+      if [ "$dry" = "1" ]; then
+        log "[dry-run] 将撤销唤醒（不落盘）：会话 $sid；数据 home：$data2"
+        log "  执行：rdsh wake del $sid（去掉 --dry-run）"
+        return 0
+      fi
+      if wake_remove "$data2" "$sid"; then
+        log "已撤销（移进回收站）：$wake_last_result"
+        state_journal wake "$sid" "撤销：$wake_last_result"
+      else
+        die "撤销失败：$wake_last_error"
+      fi
+      ;;
     show)
       local id="${1:?用法: rdsh wake show <会话id>}"
       local hit=""
@@ -4167,6 +4326,8 @@ cmd_wake() {
 rdsh wake —— 只看唤醒台账（问："重启后会续转什么"）
 
 用法:
+  rdsh wake add <会话id> <提示词> 登记「重启后继续做什么」（--target 指定版本；--dry-run 只出计划）
+  rdsh wake del <会话id>       撤销登记（**移进回收站**，不 rm；--dry-run 只出计划）
   rdsh wake ls                 列出所有唤醒条目（会话/原因/登记时间/尝试次数/提示摘要）
   rdsh wake show <会话id>      看某条的完整 JSON
 
@@ -4345,7 +4506,9 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets|restart|bridge|selfupdate|self-update ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|selfupdate|self-update ) : ;;
+    # restart 要能解析 --wake 的**目标**（要读 ENTRIES）；该组允许 0 条目，空环境照样跑
+    restart ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     restore|retire|settings|setting ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     wake ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
