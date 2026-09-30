@@ -94,6 +94,10 @@
 #   rdsh settings show|keys|carry|register
 #                                         # settings.yaml：**每版本一份真文件**（顶层键随 schema 变，
 #                                         #   不做稳定根软链）；carry 是 schema 感知携带；登记进账本
+#   rdsh state rebind <旧路径|键> <新路径> [--dry-run]
+#                                         # 改名/移动后把账本身份重绑到新路径（不新建编号）
+#   rdsh state rename <目标> [<新目录名>] [--apply]
+#                                         # 目录名规范化：mv + 账本 + .map + 实例注册表 一次改齐（默认 dry-run）
 #   rdsh retire [<目标…>] [--plan|--apply] [--force]
 #                                         # **退役**：把五类足迹（检出/数据 home/home 内插件链/
 #                                         #   指向它们的**外部软链**/日志+注册表+.map+账本）逐项清点后
@@ -2201,6 +2205,10 @@ state_record_install() {  # <检出目录> [角色]：安装完成时登记（�
   key="$(key_for_dir "$dir" "$ver")"
   local other; other="$(state_kv_get "$key" dir)"
   if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+    # 先识别"目录改名"：旧 dir 不存在 + 本目录带着同一 .installed 身份 → 重绑（不新建编号）
+    if state_rebind_if_renamed "$key" "$dir"; then
+      other="$dir"
+    else
     # 同版本的又一份：分配新次号（max+1，含墓碑；绝不重用编号）
     local nk; nk="$(state_next_key "$ver")"
     warn "同版本第二份检出：$ver 的键已被 $other 占用 → 本份分配次号 $nk"
@@ -2214,6 +2222,7 @@ state_record_install() {  # <检出目录> [角色]：安装完成时登记（�
     local dhome="$DATA_ROOT/$key"
     add_map_line "dir|$(basename "$dir")|$dhome"
     warn "  数据 home：$dhome（已写入 $MAP_FILE 的 dir 行）；两份检出**各自独立启动**"
+    fi
   fi
   role="${2:-}"
   if [ -z "$role" ]; then
@@ -2419,6 +2428,10 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     # B7 扫重：键已被别的检出占用 → 这是同版本的又一份，分配次号（max+1，含墓碑，绝不重用）
     local other; other="$kdir"
     if [ -n "$other" ] && [ "$other" != "$dir" ]; then
+      if state_rebind_if_renamed "$key" "$dir"; then
+        printf '  改名重绑  %-16s %s\n' "$key" "$dir"
+        registered=$((registered+1)); continue
+      fi
       local nk; nk="$(state_next_key "$ver")"
       warn "同版本第二份检出：$ver 的键已被 $other 占用 → 分配次号 $nk"
       key="$nk"
@@ -2596,6 +2609,8 @@ cmd_state() {
       state_set_role "$key" "$role" '人工指定'
       ;;
     render) state_render_baseline ;;
+    rebind) state_rebind "$@" ;;     # cmd_state 已 shift 掉子命令名，这里直接用剩余参数
+    rename) state_rename "$@" ;;
     sync) state_sync "$@" ;;
     record-migration|migration) state_record_migration "$@" ;;
     journal|log) state_journal_tail "$@" ;;
@@ -3649,6 +3664,139 @@ cmd_retire() {
     fi
   fi
   [ "$failed" = "0" ] || { warn "$failed 个目标未退役"; return 1; }
+}
+
+# ---------------- 改名 / 重绑 / 命名规范化（B12） ----------------
+# 身份绑在**绝对路径**上，所以"用户把检出目录改了名"必须被识别，否则：
+#   ① 账本那行的 dir 指向已消失的旧路径（doctor 报"检出不存在"）
+#   ② 下次 install/state --init 会把同一份检出误判成"同版本第二份"，铸出幻影编号 + 空数据 home
+# 本批给出三件套：自动识别（install/init 时）、显式 `state rebind`、安全改名 `state rename`。
+CANON_PREFIX="deepseek-harness-dsh"
+
+name_is_canonical() {  # <目录名> <版本>
+  local bn="$1" ver="$2"
+  case "$bn" in
+    "$CANON_PREFIX-$ver"|"$CANON_PREFIX-v$ver") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+canonical_name_for() { printf '%s-%s' "$CANON_PREFIX" "$1"; }
+
+echo_key_of_dir() {  # <检出目录> → .installed 里的 key=（回声身份）
+  [ -f "$1/.installed" ] || return 0
+  sed -nE 's/^key=(.*)$/\1/p' "$1/.installed" 2>/dev/null | tail -1 || true
+}
+
+state_rebind_if_renamed() {  # <键> <新目录>：旧 dir 不存在 + 回声身份一致 → 重绑，返回 0
+  local key="$1" newdir="$2" old ek
+  old="$(state_kv_get "$key" dir)"
+  if [ -z "$old" ] || [ "$old" = "$newdir" ]; then return 1; fi
+  if [ -e "$old" ]; then return 1; fi          # 旧路径还在 → 真的是两份检出，不重绑
+  ek="$(echo_key_of_dir "$newdir")"
+  if [ "$ek" != "$key" ]; then return 1; fi    # 回声身份对不上 → 不认（宁可多问一句）
+  state_kv_set "$key" dir "$newdir"
+  state_kv_set "$key" role_set_at "$(date -Is)"
+  state_journal rebind "$key" "目录改名自动重绑：$old → $newdir（同 .installed 身份，不新建编号）"
+  warn "识别为**目录改名**：$key 的 dir 由 $old 重绑到 $newdir（不新建编号、数据 home 不变）"
+  return 0
+}
+
+registry_repoint_dir() {  # <旧路径> <新路径>：实例注册表里指向旧路径的注解改过来
+  local old="$1" new="$2" p d n=0
+  for p in $(registry_ports 2>/dev/null || true); do
+    d="$(registry_get "$p" dir 2>/dev/null || true)"
+    if [ -n "$d" ] && [ "$d" = "$old" ]; then
+      local f="$RUN_DIR/instances/$p.kv" tmp
+      tmp="$f.tmp.$$"
+      awk -F= -v nd="$new" '/^dir=/{print "dir=" nd; next} {print}' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f"
+      n=$((n+1))
+    fi
+  done
+  [ "$n" -gt 0 ] && log "  实例注册表：$n 条注解的 dir 已改指新路径"
+  return 0
+}
+
+state_rebind() {  # <旧路径|键> <新路径> [--dry-run]
+  local who="${1:-}" newdir="${2:-}" dry=0
+  [ "${3:-}" = "--dry-run" ] && dry=1
+  [ -n "$who" ] && [ -n "$newdir" ] || die '用法: rdsh state rebind <旧路径|对象键> <新路径> [--dry-run]'
+  newdir="$(readlink -f "$newdir" 2>/dev/null || printf '%s' "$newdir")"
+  local key="" c
+  if state_kv_has "$who"; then key="$who"
+  else
+    key="$(state_key_for_dir "$who" 2>/dev/null || true)"
+    if [ -z "$key" ]; then
+      c="$(state_col_of dir)"
+      key="$(awk -F'|' -v d="$who" -v cc="$c" '!/^#/ && NF>0 && $cc==d {print $1; exit}' "$STATE_KV" 2>/dev/null || true)"
+    fi
+  fi
+  [ -n "$key" ] || die "账本里找不到与“$who”对应的对象（rdsh state list 看全部）"
+  local old; old="$(state_kv_get "$key" dir)"
+  log "重绑 $key：${old:-（空）} → $newdir"
+  if [ "$dry" = "1" ]; then echo '  [dry-run] 只改账本这一行 + 刷回声 + 记流水；不动文件系统'; return 0; fi
+  state_kv_set "$key" dir "$newdir"
+  state_kv_set "$key" role_set_at "$(date -Is)"
+  [ -f "$newdir/.installed" ] && state_echo_installed "$newdir"
+  [ -n "$old" ] && registry_repoint_dir "$old" "$newdir"
+  state_journal rebind "$key" "人工重绑：${old:-（空）} → $newdir"
+  log "完成。核对：rdsh list / rdsh doctor"
+}
+
+state_rename() {  # <目标> [<新目录名>] [--apply]
+  local who="" newbn="" apply=0 a
+  for a in "$@"; do
+    case "$a" in
+      --apply|-y) apply=1 ;;
+      --dry-run|-n) apply=0 ;;
+      -*) die "未知选项：$a（rdsh state rename <目标> [<新目录名>] [--apply]）" ;;
+      *) if [ -z "$who" ]; then who="$a"; elif [ -z "$newbn" ]; then newbn="$a"; else die "多余参数：$a"; fi ;;
+    esac
+  done
+  [ -n "$who" ] || die '用法: rdsh state rename <目标> [<新目录名>] [--apply]'
+  local e; e="$(resolve_target "$who")"
+  case "$e" in UNMANAGED:*) die "未纳入管理，不能改名：${e#UNMANAGED:}" ;; esac
+  local dir ver key base parent target
+  dir="$(readlink -f "$(entry_field "$e" 2)")"; ver="$(entry_field "$e" 1)"; key="$(entry_key "$e")"
+  base="$(basename "$dir")"; parent="$(dirname "$dir")"
+  [ -n "$newbn" ] || newbn="$(canonical_name_for "$ver")"
+  target="$parent/$newbn"
+  log "目录名规范化：$base → $newbn（对象 $key，版本 $ver）"
+  if [ "$base" = "$newbn" ]; then log '  已经是这个名字，无需改'; return 0; fi
+  if [ -e "$target" ]; then warn "  目标已存在：$target（同级不能同名）→ 不改。要换别的名字请显式给第二个参数"; return 1; fi
+  if [ "$(readlink -f "$(state_kv_get "$key" dir)")" != "$dir" ]; then warn "  账本里 $key 的 dir 不是这个目录 → 先 rdsh state rebind"; return 1; fi
+  local ports; ports="$(retire_live_ports "$dir" "$(state_data_for_dir "$dir")")"
+  [ -n "$ports" ] && warn "  该检出正被实例使用（端口 $ports）—— Linux 下改名对运行中进程安全（持 inode），注解由本命令一并改"
+  if [ "$apply" != "1" ]; then
+    echo '  [dry-run] 将执行：'
+    printf '    mv %s %s\n' "$dir" "$target"
+    printf '    账本 %s 的 dir → %s\n' "$key" "$target"
+    printf '    .map 的 dir| 行（如有）base %s → %s（数据 home 不变）\n' "$base" "$newbn"
+    printf '    实例注册表里指向 %s 的注解同步改指\n' "$dir"
+    echo "  执行：rdsh state rename $who --apply"
+    return 0
+  fi
+  if ! mv "$dir" "$target"; then warn '  mv 失败（跨设备？权限？）→ 未做任何改动'; return 1; fi
+  log "  已改名：$target"
+  state_kv_set "$key" dir "$target"
+  state_kv_set "$key" role_set_at "$(date -Is)"
+  local dhome; dhome="$(state_data_for_dir "$target")"
+  if [ -f "$MAP_FILE" ] && [ -n "$dhome" ]; then
+    # 按**数据 home** 匹配来重写（改名后 base 名已变，按旧 base 找必然找不到 —— 冒烟抓出过）
+    local tmp="$MAP_FILE.tmp.$$" n=0
+    awk -F'|' -v nb="$newbn" -v dh="$dhome" -v od="$dir" 'BEGIN{OFS="|"}
+      $1=="dir" && $3==dh { $2=nb; n++ }
+      $1=="ext" && $2==od { $2=(od==""?$2:$2) }
+      { print }
+      END { }' "$MAP_FILE" > "$tmp" && mv -f "$tmp" "$MAP_FILE"
+    if grep -q "^dir|$newbn|" "$MAP_FILE" 2>/dev/null; then
+      log "  .map：dir|<旧 base>|… → dir|$newbn|…（按数据 home $dhome 匹配；数据 home 不变）"
+    fi
+  fi
+  registry_repoint_dir "$dir" "$target"
+  [ -f "$target/.installed" ] && state_echo_installed "$target"
+  state_journal rename "$key" "目录改名：$dir → $target"
+  log "完成。核对：rdsh list；rdsh doctor --only entries,links"
 }
 
 # ---------------- selfupdate：rdsh 更新自己（B10） ----------------

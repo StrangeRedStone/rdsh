@@ -67,6 +67,11 @@ jobs:
           set -e
           bash tools/smoke-bootstrap.sh .
 
+      - name: 功能冒烟（隔离 BASE：改名重绑与命名规范化）
+        run: |
+          set -e
+          bash tools/smoke-rename.sh ./Rdsh.sh
+
       - name: 功能冒烟（门面契约）
         run: |
           set -e

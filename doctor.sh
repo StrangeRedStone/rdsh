@@ -54,11 +54,13 @@ STATE_JOURNAL="$STATE_ROOT/journal.log"
 BASELINE_MD="$BACKUP_ROOT/回退基线.md"
 INSTANCES_DIR="$RUN_DIR/instances"
 
-MODE_TEXT=1; ONLY=""; QUIET=0
+MODE_TEXT=1; ONLY=""; QUIET=0; FIX_LINKS=0; APPLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) MODE_TEXT=0 ;;
     --only) shift; ONLY="${1:-}" ;;
+    --fix-links) FIX_LINKS=1 ;;
+    --apply) APPLY=1 ;;
     --only=*) ONLY="${1#--only=}" ;;
     --quiet|-q) QUIET=1 ;;
     -h|--help) sed -n '2,/^# =\{20,\}$/p' "$0"; exit 0 ;;
@@ -238,6 +240,77 @@ dim_homes() {
 }
 
 # ---------------- 3. 软链完整性（核心：09-19 事故就是这里） ----------------
+fix_links() {  # 断链分类 + 重指（默认 dry-run；--apply 才动；改前写备份清单）
+  local -a brokens=()
+  local e data b nscan=0
+  for e in "${ENTRIES[@]:-}"; do
+    [ -n "$e" ] || continue
+    data="$(entry_data "$e")"; [ -d "$data" ] || continue
+    nscan=$((nscan + $(find "$data" -type l 2>/dev/null | wc -l)))
+    while IFS= read -r b; do [ -n "$b" ] && brokens+=("$b"); done < <(find "$data" -xtype l 2>/dev/null || true)
+  done
+  # 这一维没走普通维度循环 → 自己把"检查了几个对象"计上，否则会撞"零对象=error"守卫（误报）
+  N_OBJECTS=$((N_OBJECTS+nscan)); DIM_LINES+=("软链 $nscan（断 ${#brokens[@]}）")
+  say ''
+  say "== 断链修复（$(printf '%s' "${#brokens[@]}") 条；$([ "$APPLY" = "1" ] && echo '--apply 执行' || echo 'dry-run')）=="
+  if [ "${#brokens[@]}" = "0" ]; then say '  [ok]    没有断链，无需修'; return 0; fi
+  local bk="" n_fix=0 n_own=0 n_sib=0 n_unknown=0
+  if [ "$APPLY" = "1" ]; then
+    bk="$BACKUP_ROOT/links-fix-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$bk"
+    { echo '# link|old_target|new_target'; } > "$bk/links.kv"
+  fi
+  # 每个 home 对应的检出（用于"改指自己的检出"这一优先候选）
+  local home_ck=""
+  for b in "${brokens[@]}"; do
+    local t rel ck home cand own sib
+    t="$(readlink "$b" 2>/dev/null || true)"
+    [ -n "$t" ] || continue
+    home="${b#"$DATA_ROOT"/}"; home="${DATA_ROOT}/${home%%/*}"
+    ck=""; for e in "${ENTRIES[@]:-}"; do [ "$(entry_data "$e")" = "$home" ] && ck="$(entry_dir "$e")"; done
+    own=""; sib=""
+    if [ -n "$ck" ]; then
+      # 候选①：把"检出根之后的那段相对路径"挂到本 home **自己的**检出上（语义最正确）
+      local rest="${t#*/dsh/*/}"                    # node_modules/.pnpm/node_modules/<pkg>
+      if [ "$rest" != "$t" ] && [ -n "$rest" ] && [ -e "$ck/$rest" ]; then own="$ck/$rest"; fi
+      # 候选②：目标里那个检出目录已不存在 → 在它的兄弟目录里找同一相对路径
+      local miss="${t%%/node_modules/*}"            # …/dsh/<旧检出名>
+      if [ -n "$miss" ] && [ "$miss" != "$t" ] && [ ! -e "$miss" ]; then
+        local parent oldbn cand2 rest2
+        parent="$(dirname "$miss")"; oldbn="$(basename "$miss")"; rest2="${t#"$miss"/}"
+        for cand2 in "$parent"/*/; do
+          [ -d "$cand2" ] || continue
+          [ "$(basename "$cand2")" = "$oldbn" ] && continue
+          if [ -e "${cand2%/}/$rest2" ]; then sib="${cand2%/}/$rest2"; break; fi
+        done
+      fi
+    fi
+    cand="${own:-$sib}"
+    if [ -n "$cand" ]; then
+      if [ "$APPLY" = "1" ]; then
+        printf '%s|%s|%s\n' "$b" "$t" "$cand" >> "$bk/links.kv"
+        ln -sfn "$cand" "$b" && n_fix=$((n_fix+1))
+      else
+        printf '  [%s] %s\n        %s\n     →  %s\n' "$([ -n "$own" ] && echo 自己检出 || echo 同版本兄弟)" "${b#"$DATA_ROOT"/}" "$t" "$cand"
+        n_fix=$((n_fix+1))
+      fi
+      [ -n "$own" ] && n_own=$((n_own+1)) || n_sib=$((n_sib+1))
+    else
+      n_unknown=$((n_unknown+1))
+      [ "$APPLY" != "1" ] && printf '  [无法自动判定] %s\n        → %s\n' "${b#"$DATA_ROOT"/}" "$t"
+    fi
+  done
+  if [ "$APPLY" = "1" ]; then
+    say "  [ok]    重指 $n_fix 条（自己的检出 $n_own / 同版本兄弟 $n_sib / 无法判定 $n_unknown）；备份清单：$bk/links.kv"
+    say "          还原：while IFS='|' read -r l o n; do [ -n \"\${l:-}\" ] && ln -sfn \"\$o\" \"\$l\"; done < $bk/links.kv"
+    find_f ok links "断链修复：重指 $n_fix 条（备份 $bk/links.kv）$([ "$n_unknown" -gt 0 ] && printf '，%s 条未能判定' "$n_unknown")"
+  else
+    say "  计划重指 $n_fix 条（自己的检出 $n_own / 同版本兄弟 $n_sib / 无法判定 $n_unknown）"
+    say '  执行：rdsh doctor --fix-links --apply'
+    find_f info links "断链可修复 $n_fix 条，未判定 $n_unknown 条（dry-run；--apply 才动）"
+  fi
+  return 0
+}
+
 dim_links() {
   say ''
   say '== 3/9 软链完整性（断链 / 分叉）=='
@@ -264,11 +337,15 @@ dim_links() {
   if [ "$nbroken" -gt 0 ]; then
     # 把 09-19 那类"插件加载链"单独点名，因为断掉会让所有插件 failed to import
     local plugbroken=0
-    for b in "${brokens[@]}"; do case "$b" in *profiles/node_modules/*) plugbroken=$((plugbroken+1)) ;; esac; done
-    find_f error links "$nbroken 条断链（$([ "$plugbroken" -gt 0 ] && printf '其中 %s 条是插件加载链 profiles/node_modules —— 会让插件全部 failed to import' "$plugbroken" || printf '无插件加载链')）"
-    say "  [error] $nbroken 条断链："
-    printf '          %s\n' "${brokens[@]:0:8}"
-    [ "$nbroken" -gt 8 ] && say "          …（共 $nbroken 条，自查：find <home> -xtype l）"
+    for b in "${brokens[@]}"; do case "$b" in *profiles/node_modules/*|*/plugins/*/node_modules/*) plugbroken=$((plugbroken+1)) ;; esac; done
+    # **按 home 分组报数**（一次甩几百行路径没法用）
+    local grp line
+    grp="$(for b in "${brokens[@]}"; do h="${b#"$DATA_ROOT"/}"; printf '%s\n' "${DATA_ROOT}/${h%%/*}"; done | sort | uniq -c | sort -rn | awk '{printf "%s×%s ", $2, $1}')"
+    find_f error links "$nbroken 条断链（$([ "$plugbroken" -gt 0 ] && printf '其中 %s 条在插件/依赖加载链上（profiles/node_modules、plugins/*/node_modules）' "$plugbroken" || printf '无加载链')；按 home：$(printf '%s' "$grp" | sed "s|$DATA_ROOT/||g"))"
+    say "  [error] $nbroken 条断链（按 home：$(printf '%s' "$grp" | sed "s|$DATA_ROOT/||g"))"
+    printf '          %s\n' "${brokens[@]:0:4}"
+    say '          典型原因：检出被改名/移动 → 链里的绝对路径失效（真机 2026-09-30 实例）'
+    say '          修复：rdsh doctor --fix-links（先 dry-run 看分类，--apply 才改；改前自动写备份清单）'
   else
     find_f ok links "无断链"
     say '  [ok]    0 条断链'
@@ -514,11 +591,19 @@ dim_config() {
 }
 
 # ---------------- 跑 ----------------
-DIMS_ALL=(entries homes links plugins state instances logs disk config)
-for dim in "${DIMS_ALL[@]}"; do
-  want "$dim" || continue
-  "dim_$dim"
-done
+# **维度之间不许依赖副作用**：ENTRIES 在这儿统一加载一次。
+# 踩过：ENTRIES 只在 dim_entries 里 load，于是 `doctor --only links` 拿到空数组 →
+# "扫了 0 条软链"，全靠零对象守卫才没报成"一切正常"。
+load_entries
+if [ "$FIX_LINKS" = "1" ]; then
+  fix_links
+else
+  DIMS_ALL=(entries homes links plugins state instances logs disk config)
+  for dim in "${DIMS_ALL[@]}"; do
+    want "$dim" || continue
+    "dim_$dim"
+  done
+fi
 
 # 零检查必须报错（路线图已知风险：不许"零检查却报全绿"）
 if [ "$N_OBJECTS" = "0" ]; then

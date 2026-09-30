@@ -91,7 +91,9 @@ ln -s "$B/nonexistent-target" "$B/.dsh/9.9.7-rc.2/profiles/node_modules/@deepsee
 out="$(run 2>&1)"; rc=$?
 rc_is "$rc" 2 '有断链时退出码 2'
 has "$out" '断链' '报出断链'
-has "$out" '插件加载链' '点名插件加载链（09-19 那类）'
+has "$out" '插件/依赖加载链' '点名插件/依赖加载链（09-19 那类）'
+  has "$out" '按 home：' '断链按 home 分组报数（B12）'
+  has "$out" '--fix-links' '给出修复命令（B12）'
 rm -f "$B/.dsh/9.9.7-rc.2/broken-plugin-link"
 
 echo '--- 3) 账本缺 baseline / 回声不一致 → warn 或 info，不崩 ---'

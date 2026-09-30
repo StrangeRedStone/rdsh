@@ -42,6 +42,9 @@
 | `rdsh bridge --spec [--json]` | **门面契约**：把 rdsh 的能力清单（id/子命令/参数/风险等级/默认参数）交给 dsh 插件。插件只是注册器 —— 加子命令不用改插件；危险能力的默认（dry-run / 只出计划）在契约里就定死 |
 | `rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--force] [--log <文件>]` | 重启入口（转发 `rdsh-restart.sh`：systemd-run 逃逸舱 + 等端口释放 + 无人值守 headless 接手）。**输出落点会打印出来**（在 systemd 托管的 dsh 里，脚本按设计写日志文件而不是 stdout） |
 | `rdsh wake ls\|show <会话id>` | **只读**看唤醒台账：重启后要续转哪些会话（目录 `<数据 home>/wake/<会话id>.json`） |
+| `rdsh state rebind <旧路径\|键> <新路径>` | 检出名改了/挪了 → 把账本身份**重绑**到新路径（不新建编号）；`--dry-run` 先看 |
+| `rdsh state rename <目标> [<新名>] [--apply]` | **目录名规范化**：`mv` + 账本 + `.map` + 实例注册表一次改齐（默认 dry-run；同级同名会拒绝） |
+| `rdsh doctor --fix-links [--apply]` | 断链**分类 + 重指**：①挂回本 home 自己的检出 ②同版本兄弟目录 ③无法判定；先写备份清单（可逐条还原），默认 dry-run |
 | `rdsh settings show\|keys\|carry\|register` | **settings.yaml 的查看 / 携带 / 登记**：`carry` 是 **schema 感知**合并（同名键取源值、目标独有键保留、源独有键附带并告警），旧文件先进回收站；登记会写路径 + sha 指纹进账本 |
 | `rdsh retire [<目标…>] [--plan\|--apply] [--force]` | **退役**：把五类足迹（检出 / 数据 home / home 内插件链 / **指向它们的**外部软链** / 日志+注册表+`.map`+账本）逐项清点后**整体挪进同一个回收条目**（可整体还原）。**默认只出计划**；在跑的拒绝；回退基线或最后一版可启动版本要 `--force` 并当场写明后果 |
 | `rdsh scan --path <目录> \| --staged \| --files <文件>…` | **隐私守卫**：扫私钥 / 令牌 / 凭据文件 / 会话数据（error）与绝对家目录 / 邮箱 / 大文件（warn）。**报告不回显敏感值**；必报"扫了几个文件"，0 个报 error；退出码 0/1/2（`--strict` 把 warn 提级）。`tools/publish.sh --stage` 与「我的 dsh」的 `backup.sh --commit` 都会先过它 |
@@ -176,6 +179,15 @@ bash bootstrap.sh --with-dsh latest
 - **dsh 插件管**："在 dsh 里面怎么用、怎么看" —— 工具/命令/按钮，**薄**，逻辑转发给脚本。
 
 重叠区一律「**逻辑进脚本、界面进插件**」，**脚本是权威**。落地靠 `rdsh bridge --spec --json` 的能力清单：插件读清单注册工具，所以加子命令不用改插件；`write` 默认带 `--dry-run`、`destructive` 默认只出计划，**门面不替用户改默认**。据此，与本仓库功能重叠的插件（如"重启"）可以退出历史，只留门面。
+
+### 检出改名 / 移动（0.9.0 起）
+
+身份绑在**绝对路径**上，所以改名必须显式处理：
+
+- 改名后跑 `rdsh state rebind <旧路径|键> <新路径>`（或直接 `rdsh state --init` / `rdsh install`，会**自动识别**改名并重绑，**不会再铸出"同版本第二份"的幻影编号**）
+- 想顺手把名字改成规范名（`deepseek-harness-dsh-<版本>`）：`rdsh state rename <目标> --apply`
+- **dsh 自己在 boot 时也会把"安装根"的包以绝对路径链进 `$DSH_HOME/...`** → 改名会让这些链断掉；
+  `rdsh doctor` 会按 home 报数，用 `rdsh doctor --fix-links --apply` 修复（改前自动写备份清单）
 
 ### settings.yaml（每版本一份，0.6.0 起）
 
