@@ -44,6 +44,7 @@
 | `rdsh wake ls\|show <会话id>` | **只读**看唤醒台账：重启后要续转哪些会话（目录 `<数据 home>/wake/<会话id>.json`） |
 | `rdsh state rebind <旧路径\|键> <新路径>` | 检出名改了/挪了 → 把账本身份**重绑**到新路径（不新建编号）；`--dry-run` 先看 |
 | `rdsh state rename <目标> [<新名>] [--apply]` | **目录名规范化**：`mv` + 账本 + `.map` + 实例注册表一次改齐（默认 dry-run；同级同名会拒绝） |
+| `rdsh doctor --only entry` | **入口链自检**：PATH 里的 `rdsh`、`<检出>/rdsh`、桌面图标 `Exec`、入口目录是否在 PATH；断哪条给修复命令 |
 | `rdsh doctor --fix-links [--apply]` | 断链**分类 + 重指**：①挂回本 home 自己的检出 ②同版本兄弟目录 ③无法判定；先写备份清单（可逐条还原），默认 dry-run |
 | `rdsh settings show\|keys\|carry\|register` | **settings.yaml 的查看 / 携带 / 登记**：`carry` 是 **schema 感知**合并（同名键取源值、目标独有键保留、源独有键附带并告警），旧文件先进回收站；登记会写路径 + sha 指纹进账本 |
 | `rdsh retire [<目标…>] [--plan\|--apply] [--force]` | **退役**：把五类足迹（检出 / 数据 home / home 内插件链 / **指向它们的**外部软链** / 日志+注册表+`.map`+账本）逐项清点后**整体挪进同一个回收条目**（可整体还原）。**默认只出计划**；在跑的拒绝；回退基线或最后一版可启动版本要 `--force` 并当场写明后果 |
@@ -172,6 +173,22 @@ bash bootstrap.sh --with-dsh latest
 七步：**依赖自检**（缺谁点名并给安装命令）→ **取本体**（clone 默认 SSH、失败自动试 HTTPS；目标已是 git 检出则 `pull --ff-only`，幂等）→ **建目录**（`.dsh-suite/{data,shared,backup,logs,state,run,debug,plugins,patches,trash}`）→ **写配置**（`~/.config/rdsh/config`，**只补缺键、绝不覆盖已有值**，显式写全套根以对齐 `.dsh-suite/` 布局）→ **落入口**（`<检出>/rdsh` + `~/.local/bin/rdsh`；**已存在的一律不动**，要替换得显式 `--force`，入口没落成会以退出码 4 报出）→ **可选装 dsh** → **验收**（`rdsh base` / `doctor` / `bridge --spec`）。日志落 `<BASE>/.dsh-suite/logs/bootstrap-<ts>.log`。
 
 之后自更新用 `rdsh selfupdate`：**先备份回滚点**（`dsh-scripts-<ts>/` + `MD5SUMS`）→ **先校验**（语法 + 隐私守卫 + 冒烟，都在源目录里跑、不碰本机）→ **原子替换**（临时名 + `mv`，运行中的脚本靠 inode 续命）→ **失败自动回滚**。校验不过**一个字节都不装**。
+
+## rdsh 不在 / 坏了时（0.9.1 起）
+
+**rdsh 是便利层，不是唯一启动路径。** dsh 本体与每版本数据 home 都在磁盘上，任何时候都能手工起：
+
+```bash
+cd <检出>                                          # 例：~/Mapp/dsh/deepseek-harness-dsh-0.1.7-rc.2
+DSH_HOME=~/Mapp/.dsh-suite/data/<对象键> pnpm dsh web --port 3080
+```
+
+裸启动**比 rdsh 少做四件事**：注入 `DSH_HOME`、`ensure_data_home`（首播/建链）、`ensure_built`（install+build）、`registry_put`（实例注解）。所以裸启动最常见的症状是"**找不到自定义的数据目录 / 会话看起来全空**"——数据没丢，只是落到了默认 home。
+
+- 找数据 home 三条路：`rdsh base`／账本 `versions.kv` 的 `key` 列／检出内 `.installed` 的 `key=`
+- 自查入口链：`rdsh doctor --only entry`（rdsh 命令、`<检出>/rdsh`、桌面图标 `Exec`、PATH）
+- 把 rdsh 装回来：`bash bootstrap.sh`（联网）或 `bash bootstrap.sh --from <目录|tarball>`（离线）
+- 完整版：[docs/应急启动.md](docs/应急启动.md)（机器上也有一份 `~/Mapp/dsh/应急启动.md`）
 
 ## 能力与界面的分层（作法，0.7.0 起）
 

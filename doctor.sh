@@ -55,6 +55,10 @@ BASELINE_MD="$BACKUP_ROOT/回退基线.md"
 INSTANCES_DIR="$RUN_DIR/instances"
 
 MODE_TEXT=1; ONLY=""; QUIET=0; FIX_LINKS=0; APPLY=0
+# 入口链检查的"根"：默认 $HOME；冒烟用 RDSH_ENTRY_ROOT 指到临时目录（**绝不为测试动真机入口**）
+ENTRY_ROOT="${RDSH_ENTRY_ROOT:-$HOME}"
+ENTRY_BIN_DIR="${RDSH_ENTRY_BIN_DIR:-$ENTRY_ROOT/.local/bin}"
+ENTRY_DESKTOP="${RDSH_ENTRY_DESKTOP:-$ENTRY_ROOT/.local/share/applications/dsh.desktop}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) MODE_TEXT=0 ;;
@@ -139,7 +143,7 @@ entry_data() { printf '%s' "${1##*|}"; }
 # ---------------- 1. 检出 ----------------
 dim_entries() {
   say ''
-  say '== 1/9 检出（版本 / 安装状态 / .installed 回声）=='
+  say '== 1/10 检出（版本 / 安装状态 / .installed 回声）=='
   load_entries
   local n="${#ENTRIES[@]}"
   N_OBJECTS=$((N_OBJECTS+n)); DIM_LINES+=("检出 $n")
@@ -220,7 +224,7 @@ kv_by_dir() {  # <检出目录> → 对象键
 # ---------------- 2. 数据 home ----------------
 dim_homes() {
   say ''
-  say '== 2/9 数据 home（存在 / 权限 / 体积）=='
+  say '== 2/10 数据 home（存在 / 权限 / 体积）=='
   local e data n=0 used
   for e in "${ENTRIES[@]:-}"; do
     [ -n "$e" ] || continue
@@ -313,7 +317,7 @@ fix_links() {  # 断链分类 + 重指（默认 dry-run；--apply 才动；改�
 
 dim_links() {
   say ''
-  say '== 3/9 软链完整性（断链 / 分叉）=='
+  say '== 3/10 软链完整性（断链 / 分叉）=='
   local e data nlink=0 nbroken=0 nm b
   local -a brokens=()
   for e in "${ENTRIES[@]:-}"; do
@@ -365,10 +369,83 @@ dim_links() {
   done
 }
 
+# ---------------- 3.5 入口链（B11：rdsh 不总是健全） ----------------
+# 回答"命令还能不能用、图标还能不能点"：rdsh 是**便利层**，它断了用户就该有降级路径。
+dim_entry() {
+  say ''
+  say '== 3.5/10 入口链（rdsh 命令 / 桌面图标 / PATH）=='
+  local n=0 bad=0
+  # ① 规范入口路径（**只查这一处**；用 command -v 会被"真机那套"遮住，隔离夹具就测不出来）
+  local l0="$ENTRY_BIN_DIR/rdsh"
+  n=$((n+1))
+  if [ -L "$l0" ] || [ -e "$l0" ]; then
+    if [ -e "$l0" ] && [ -x "$l0" ]; then
+      say "  [ok]    入口：$l0 → $(readlink "$l0" 2>/dev/null || echo '（实文件）')"
+    else
+      find_f error entry "入口 $l0 不可用（断链或不可执行）→ 修复：ln -sfn $MANAGE_ROOT/Rdsh.sh $l0"
+      say "  [error] 入口不可用：$l0"; bad=1
+    fi
+  else
+    find_f warn entry "入口不存在：$l0 → 修复：bash $MANAGE_ROOT/bootstrap.sh --base $BASE（或 ln -sfn $MANAGE_ROOT/Rdsh.sh $l0）"
+    say "  [warn]  入口不存在：$l0"; bad=1
+  fi
+  # ①b PATH 实际解析到哪个（信息级：可能有别的同名命令抢先）
+  local which; which="$(PATH="$ENTRY_BIN_DIR:$PATH" command -v rdsh 2>/dev/null || true)"
+  if [ -n "$which" ]; then
+    if [ "$which" = "$l0" ]; then say "  [info]  PATH 解析：$which"
+    else find_f info entry "PATH 里的 rdsh 不是规范入口：$which（期望 $l0）"; say "  [info]  PATH 解析到别处：$which"; fi
+  else
+    find_f warn entry "PATH 里找不到 rdsh（$ENTRY_BIN_DIR 也不在 PATH？）"
+    say "  [warn]  PATH 里找不到 rdsh"
+  fi
+  # ② <检出>/rdsh → Rdsh.sh
+  local l1="$MANAGE_ROOT/rdsh"
+  if [ -L "$l1" ] || [ -e "$l1" ]; then
+    if [ -e "$l1" ]; then say "  [ok]    $l1 → 可解析"; else
+      find_f warn entry "$l1 是断链 → 修复：ln -sfn $MANAGE_ROOT/Rdsh.sh $l1"
+      say "  [warn]  $l1 是断链"; bad=1
+    fi
+    n=$((n+1))
+  else
+    find_f info entry "$l1 不存在（非必需；bootstrap 会建）"
+    say "  [info]  $l1 不存在"
+  fi
+  # ③ 桌面图标的 Exec
+  if [ -f "$ENTRY_DESKTOP" ]; then
+    local ex; ex="$(sed -nE 's/^Exec=(.*)$/\1/p' "$ENTRY_DESKTOP" | head -1 | awk '{print $1}')"
+    n=$((n+1))
+    if [ -n "$ex" ]; then
+      local exp; exp="$(expand_tilde "$ex")"
+      if [ -x "$exp" ]; then say "  [ok]    桌面图标 Exec 可用：$ex"
+      else
+        find_f error entry "桌面图标 $(basename "$ENTRY_DESKTOP") 的 Exec 指向不可执行/不存在的路径：$ex → 修复：重建入口软链后 update-desktop-database ~/.local/share/applications"
+        say "  [error] 桌面图标 Exec 失效：$ex"; bad=1
+      fi
+    else
+      find_f info entry "桌面图标没有 Exec 行（$ENTRY_DESKTOP）"
+    fi
+  else
+    say "  [info]  无桌面图标文件（$ENTRY_DESKTOP；非必需）"
+  fi
+  # ④ 入口目录在 PATH 里吗
+  case ":$PATH:" in
+    *":$ENTRY_BIN_DIR:"*) say "  [ok]    入口目录在 PATH 里：$ENTRY_BIN_DIR" ;;
+    *) find_f warn entry "入口目录不在 PATH 里：$ENTRY_BIN_DIR → 加一行 export PATH=\"$ENTRY_BIN_DIR:\$PATH\""
+       say "  [warn]  入口目录不在 PATH：$ENTRY_BIN_DIR"; bad=1 ;;
+  esac
+  N_OBJECTS=$((N_OBJECTS+n)); DIM_LINES+=("入口链 $n（异常 $bad）")
+  if [ "$n" = "0" ]; then
+    find_f error entry "入口链一点都没查到（ENTRY_ROOT=$ENTRY_ROOT）"
+  fi
+  # 降级路径一句话：随时可脱离 rdsh 启动
+  say "  [info]  降级启动（不依赖 rdsh）：cd <检出> && DSH_HOME=<该版本数据 home> pnpm dsh web --port 3080"
+  say "  [info]  应急卡：$MANAGE_ROOT/应急启动.md（重装 rdsh：bash $MANAGE_ROOT/bootstrap.sh --from <目录|tarball>）"
+}
+
 # ---------------- 4. 插件一致性 ----------------
 dim_plugins() {
   say ''
-  say '== 4/9 插件（权威副本 ↔ 各 home）=='
+  say '== 4/10 插件（权威副本 ↔ 各 home）=='
   local ncanon=0
   if [ -d "$PLUGIN_ROOT" ]; then ncanon="$(find "$PLUGIN_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)"; fi
   N_OBJECTS=$((N_OBJECTS+ncanon)); DIM_LINES+=("插件权威 $ncanon")
@@ -398,7 +475,7 @@ dim_plugins() {
 # ---------------- 5. 状态账本 ----------------
 dim_state() {
   say ''
-  say '== 5/9 状态账本（唯一权威）=='
+  say '== 5/10 状态账本（唯一权威）=='
   if [ ! -f "$STATE_KV" ]; then
     find_f info state "账本未播种（跑 rdsh state --init）；角色信息不可用"
     say '  [info]  账本未播种'
@@ -468,7 +545,7 @@ dim_state() {
 # ---------------- 6. 实例 ----------------
 dim_instances() {
   say ''
-  say '== 6/9 运行实例（ss + /proc 真相层）=='
+  say '== 6/10 运行实例（ss + /proc 真相层）=='
   command -v ss >/dev/null 2>&1 || { find_f info instances '没有 ss，无法探测实例'; N_OBJECTS=$((N_OBJECTS+1)); DIM_LINES+=("实例 n/a"); return; }
   local rows p pid dir home cmd n=0
   declare -A seen_home=()
@@ -509,7 +586,7 @@ dim_instances() {
 # ---------------- 7. 日志 ----------------
 dim_logs() {
   say ''
-  say '== 7/9 启动日志（权限 / 报错扫描）=='
+  say '== 7/10 启动日志（权限 / 报错扫描）=='
   if [ ! -d "$LOG_DIR" ]; then
     find_f info logs "没有日志目录（$LOG_DIR）"; say '  [info]  无日志目录'
     N_OBJECTS=$((N_OBJECTS+1)); DIM_LINES+=("日志 0"); return
@@ -534,7 +611,7 @@ dim_logs() {
 # ---------------- 8. 磁盘 / 内存 ----------------
 dim_disk() {
   say ''
-  say '== 8/9 磁盘与内存余量 =='
+  say '== 8/10 磁盘与内存余量 =='
   local dfout pct avail
   if dfout="$(df -Pk "$BASE" 2>/dev/null | tail -1)"; then
     pct="$(printf '%s' "$dfout" | awk '{gsub("%","",$5); print $5}')"
@@ -572,7 +649,7 @@ dim_disk() {
 # ---------------- 9. 配置 ----------------
 dim_config() {
   say ''
-  say '== 9/9 配置解析 =='
+  say '== 9/10 配置解析 =='
   local n=0
   [ -f "$RDSH_CONFIG" ] && { n=$((n+1)); say "  [ok]    配置文件 $RDSH_CONFIG"; } || { find_f info config "配置文件不存在（$RDSH_CONFIG，用默认值）"; say '  [info]  无配置文件'; }
   local v over=""
@@ -598,7 +675,7 @@ load_entries
 if [ "$FIX_LINKS" = "1" ]; then
   fix_links
 else
-  DIMS_ALL=(entries homes links plugins state instances logs disk config)
+  DIMS_ALL=(entries homes links entry plugins state instances logs disk config)
   for dim in "${DIMS_ALL[@]}"; do
     want "$dim" || continue
     "dim_$dim"

@@ -2,6 +2,29 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 0.9.1 — 2026-09-30
+
+> 起因：用户指出「因为 rdsh 接管了 dsh，旧有的启动方式在这里失效了。我们在 rdsh 项目总是默认 rdsh 健全地存在，但实际可能不总是这样」——
+> 当天真机就撞上：入口软链被误清，`rdsh` 命令与桌面图标一起消失。
+
+### 新增
+
+- **`rdsh doctor --only entry` —— 入口链自检**（第 3.5 维）：规范入口 `~/.local/bin/rdsh`（可解析/可执行）、
+  `<检出>/rdsh`、桌面图标的 `Exec` 目标、入口目录是否在 PATH；**断哪条就给可直接复制的修复命令**。
+  并把"PATH 实际解析到哪个 rdsh"作为信息级报告（可能有别的同名命令抢先）。
+- **应急卡 `应急启动.md`**（机器上 `~/Mapp/dsh/应急启动.md` + 仓库 `docs/应急启动.md`，`bootstrap.sh` 完成时打印摘要）：
+  纯文本、**不依赖 rdsh 可运行** —— ① 找数据 home 三条路（`rdsh base`／账本 `key` 列／`.installed` 的 `key=`）；
+  ② 裸启动 `cd <检出> && DSH_HOME=<home> pnpm dsh web --port 3080` **并列出裸启动少做的四件事**；
+  ③ 装回/修入口（`bootstrap.sh`、`ln -sfn`、`update-desktop-database`、`selfupdate`）；④ 症状→处置表。
+- README 新增「rdsh 不在 / 坏了时」一节，口径改为：**rdsh 是便利层，不是唯一启动路径**。
+- `tools/smoke-entry.sh`（**21 项断言**）：断链入口→error+修复命令、无入口→warn、坏图标 Exec→error、
+  `<检出>/rdsh` 断链→warn、`--only entry` 不许 0 对象，以及**真机入口状态前后必须一致**（事故换来的硬约束）。
+
+### 修复
+
+- 入口检查原本用 `command -v rdsh`（PATH 查找）→ **真机那套总会把隔离夹具遮住**，断链永远测不到；
+  改为**只查规范入口路径**，PATH 解析结果降为 info。
+
 ## 0.9.0 — 2026-09-30
 
 > 起因：真机把检出 `deepseek-harness` 改名成 `deepseek-harness-dsh-0.1.7-rc.2`，触发两条链式故障

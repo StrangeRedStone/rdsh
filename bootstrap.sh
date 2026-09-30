@@ -294,4 +294,10 @@ cat <<EOF
   4) 装插件/作者资产：   把 author 资产放到 $BASE/.dsh-suite/shared（或 rdsh restore）
   5) 之后自更新：        rdsh selfupdate（拉仓库 → 语法+冒烟+隐私守卫 → 失败自动回滚）
   日志：$LOG
+
+  应急卡（rdsh 不在/坏了时怎么办）：$DEST/应急启动.md
+    · 找数据 home：rdsh base｜账本 versions.kv 的 key 列｜检出内 .installed 的 key=
+    · 裸启动：cd <检出> && DSH_HOME=<该版本数据 home> pnpm dsh web --port 3080
+      （裸启动少做四件事：注入 DSH_HOME、ensure_data_home、ensure_built、registry_put）
+    · 自查入口链：rdsh doctor --only entry
 EOF
