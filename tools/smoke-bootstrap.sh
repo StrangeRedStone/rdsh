@@ -31,6 +31,10 @@ for f in bootstrap.sh Rdsh.sh doctor.sh scan-secrets.sh; do [ -f "$SRC/$f" ] && 
 [ -f "$SRC/tools/smoke-bridge.sh" ] && cp -p "$SRC/tools/smoke-bridge.sh" "$SRC2/tools/"
 
 PASS=0; FAIL=0
+# 真机家目录入口的"前后指纹"：本测试**绝不允许**动它（踩过的坑，见文件头）
+REAL_LINK="$HOME/.local/bin/rdsh"
+real_link_state() { if [ -L "$REAL_LINK" ]; then printf 'L:%s' "$(readlink "$REAL_LINK")"; elif [ -e "$REAL_LINK" ]; then printf 'F'; else printf 'none'; fi; }
+REAL_LINK_BEFORE="$(real_link_state)"
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
 has()  { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3（缺：$2）" ;; esac; }
@@ -144,8 +148,19 @@ out="$(env RDSH_BASE="$B1" RDSH_CONFIG="$B1/rdsh.config" bash "$B1RD/Rdsh.sh" se
 rc_is "$rc" 0 '回滚 rc=0'
 hasnt "$(cat "$B1RD/Rdsh.sh")" 'SELFUPDATE-SMOKE-MARKER-v2' '旧版本已还原（标记消失）'
 
+echo '--- 9.5) 已有外部入口软链 → 默认不动（rc=4），--force 才替换 ---'
+BF="$T/base-force"; BINF="$T/bin-force"; mkdir -p "$BINF"
+ln -sfn /some/other/place "$BINF/rdsh"
+out="$(bash "$SRC/bootstrap.sh" --base "$BF" --config "$BF/c" --from "$SRC2" --bin-dir "$BINF" 2>&1)"; rc=$?
+rc_is "$rc" 4 '已有外部软链 → rc=4 明确报出'
+has "$out" '不动它' '明确说不动它'
+[ "$(readlink "$BINF/rdsh")" = "/some/other/place" ] && ok '外部软链没有被覆盖' || bad '外部软链被覆盖了！'
+out="$(bash "$SRC/bootstrap.sh" --base "$BF" --config "$BF/c" --from "$SRC2" --bin-dir "$BINF" --force 2>&1)"; rc=$?
+rc_is "$rc" 0 '--force 时才替换'
+[ "$(readlink "$BINF/rdsh")" = "$BF/dsh/rdsh" ] && ok '--force 后指向本检出' || bad '--force 没有生效'
+
 echo '--- 10) 真机未被触碰 ---'
-[ ! -e "$HOME/.local/bin/rdsh" ] || [ -L "$HOME/.local/bin/rdsh" ] && ok '真机 ~/.local/bin/rdsh 存在与否未被本测试改动' || true
+[ "$REAL_LINK_BEFORE" = "$(real_link_state)" ] && ok "真机 $REAL_LINK 状态未变（$REAL_LINK_BEFORE）" || bad "真机入口被改了：$REAL_LINK_BEFORE → $(real_link_state)"
 REAL_MD5="$(md5sum "$HOME/Mapp/dsh/Rdsh.sh" | cut -c1-8)"
 [ "$REAL_MD5" = "$(md5sum "$HOME/Mapp/dsh/Rdsh.sh" | cut -c1-8)" ] && ok '真机 Rdsh.sh md5 未变' || bad '真机 Rdsh.sh 被改了'
 N_REAL_BK="$(ls -1d "$HOME/Mapp/.dsh-suite/backup"/dsh-scripts-*/ 2>/dev/null | wc -l)"

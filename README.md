@@ -166,7 +166,7 @@ bash bootstrap.sh --with-dsh latest
 # 想先看计划：bash bootstrap.sh --dry-run
 ```
 
-七步：**依赖自检**（缺谁点名并给安装命令）→ **取本体**（clone 默认 SSH、失败自动试 HTTPS；目标已是 git 检出则 `pull --ff-only`，幂等）→ **建目录**（`.dsh-suite/{data,shared,backup,logs,state,run,debug,plugins,patches,trash}`）→ **写配置**（`~/.config/rdsh/config`，**只补缺键、绝不覆盖已有值**，显式写全套根以对齐 `.dsh-suite/` 布局）→ **落入口**（`<检出>/rdsh` + `~/.local/bin/rdsh`）→ **可选装 dsh** → **验收**（`rdsh base` / `doctor` / `bridge --spec`）。日志落 `<BASE>/.dsh-suite/logs/bootstrap-<ts>.log`。
+七步：**依赖自检**（缺谁点名并给安装命令）→ **取本体**（clone 默认 SSH、失败自动试 HTTPS；目标已是 git 检出则 `pull --ff-only`，幂等）→ **建目录**（`.dsh-suite/{data,shared,backup,logs,state,run,debug,plugins,patches,trash}`）→ **写配置**（`~/.config/rdsh/config`，**只补缺键、绝不覆盖已有值**，显式写全套根以对齐 `.dsh-suite/` 布局）→ **落入口**（`<检出>/rdsh` + `~/.local/bin/rdsh`；**已存在的一律不动**，要替换得显式 `--force`，入口没落成会以退出码 4 报出）→ **可选装 dsh** → **验收**（`rdsh base` / `doctor` / `bridge --spec`）。日志落 `<BASE>/.dsh-suite/logs/bootstrap-<ts>.log`。
 
 之后自更新用 `rdsh selfupdate`：**先备份回滚点**（`dsh-scripts-<ts>/` + `MD5SUMS`）→ **先校验**（语法 + 隐私守卫 + 冒烟，都在源目录里跑、不碰本机）→ **原子替换**（临时名 + `mv`，运行中的脚本靠 inode 续命）→ **失败自动回滚**。校验不过**一个字节都不装**。
 

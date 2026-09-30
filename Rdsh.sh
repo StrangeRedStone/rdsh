@@ -2942,7 +2942,8 @@ cmd_trash() {
         fi
         i=$((i+1))
       done
-      ( umask 077; printf 'restored_at=%s\n' "$(date -Is)" >> "$mf" )
+      # 只有真还原才写留痕；--dry-run **绝不能改清单**（踩过：干跑往里追加了 3 行 restored_at）
+      [ "$dry" != "1" ] && ( umask 077; printf 'restored_at=%s\n' "$(date -Is)" >> "$mf" )
       if [ "$dry" = "1" ]; then
         log "计划还原 $moved 项（--dry-run：**未动任何文件**）$([ "$skipped" -gt 0 ] && printf '，将跳过 %s 项' "$skipped")"
       else

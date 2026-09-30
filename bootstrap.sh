@@ -21,6 +21,7 @@
 #   bootstrap.sh --from ~/Downloads/rdsh.tar.gz   # 离线装机（或 --from <已 clone 的目录>）
 #   bootstrap.sh --from .                          # 从当前目录（本身就是 clone）装
 #   bootstrap.sh --with-dsh latest                 # 顺手装一个 dsh 版本
+#   bootstrap.sh --force                           # 允许替换已存在的入口软链（默认**绝不覆盖**）
 #   bootstrap.sh --dry-run                         # 只打印计划（可安全随时跑）
 #
 # 退出码：0 成功 / 1 参数错误 / 2 取本体失败 / 3 依赖缺失 / 4 配置或入口失败 / 5 验收失败
@@ -40,6 +41,7 @@ BIN_DIR="$HOME/.local/bin"
 DRY=0
 NO_LINK=0
 NO_DEPS=0
+FORCE=0
 LOG=""
 
 die()  { printf '\033[1;31m[bootstrap!]\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
@@ -67,6 +69,7 @@ while [ $# -gt 0 ]; do
     --bin-dir=*) BIN_DIR="${1#--bin-dir=}" ;;
     --dry-run|-n) DRY=1 ;;
     --no-link) NO_LINK=1 ;;
+    --force) FORCE=1 ;;
     --no-deps-check) NO_DEPS=1 ;;
     -h|--help) sed -n '2,/^# =\{20,\}$/p' "$0"; exit 0 ;;
     *) die "未知参数：$1（--help 看用法）" ;;
@@ -220,23 +223,35 @@ step "5/7 落 rdsh 入口"
 if [ "$NO_LINK" = "1" ]; then
   say '  --no-link：跳过入口软链'
 else
-  L1="$DEST/rdsh"
-  if [ -L "$L1" ] || [ ! -e "$L1" ]; then
-    printf '  %s %s → Rdsh.sh\n' "$([ -L "$L1" ] && echo '=' || echo '+')" "$L1"
-    if [ "$DRY" = "0" ]; then ln -sfn "$DEST/Rdsh.sh" "$L1"; chmod +x "$DEST/Rdsh.sh" 2>/dev/null || true; fi
-  else
-    warn "  $L1 已存在且不是软链 → 不动（手工确认）"
-  fi
-  if [ -d "$BIN_DIR" ] || [ "$DRY" = "0" ]; then
-    L2="$BIN_DIR/rdsh"
-    if [ -L "$L2" ] || [ ! -e "$L2" ]; then
-      printf '  + %s → %s\n' "$L2" "$L1"
-      run mkdir -p "$BIN_DIR"
-      if [ "$DRY" = "0" ]; then ln -sfn "$L1" "$L2"; fi
-      case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "  $BIN_DIR 不在 PATH 里 → 加一行：export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
+  # 落软链的规矩：**绝不覆盖**已存在的东西（哪怕它是个软链）——除非 --force。
+  # 事故换来的：bootstrap 的冒烟没隔离 --bin-dir，把真机 ~/.local/bin/rdsh 指到了临时目录，
+  # 之后又被当成"测试残留"收走，于是命令与桌面图标一起消失。默认不动，是唯一安全的默认。
+  ENTRY_FAILED=0
+  link_one() {  # <软链路径> <目标>
+    local l="$1" t="$2" cur=""
+    if [ -L "$l" ]; then
+      cur="$(readlink "$l")"
+      if [ "$cur" = "$t" ]; then printf '  = %s（已指向 %s）\n' "$l" "$t"; return 0; fi
+      if [ "$FORCE" != "1" ]; then
+        warn "  $l 已是软链 → **不动它**（现在指向 $cur；要换加 --force）"
+        ENTRY_FAILED=1; return 1
+      fi
+      printf '  ~ %s：%s → %s（--force）\n' "$l" "$cur" "$t"
+    elif [ -e "$l" ]; then
+      warn "  $l 已存在且不是软链 → **不动它**（要替换请先手工改名）"
+      ENTRY_FAILED=1; return 1
     else
-      warn "  $L2 已存在且不是软链 → 不动"
+      printf '  + %s → %s\n' "$l" "$t"
     fi
+    run ln -sfn "$t" "$l"
+    return 0
+  }
+  if [ "$DRY" = "0" ]; then chmod +x "$DEST/Rdsh.sh" 2>/dev/null || true; fi
+  link_one "$DEST/rdsh" "$DEST/Rdsh.sh" || true
+  if [ -d "$BIN_DIR" ] || [ "$DRY" = "0" ]; then
+    run mkdir -p "$BIN_DIR"
+    link_one "$BIN_DIR/rdsh" "$DEST/rdsh" || true
+    case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "  $BIN_DIR 不在 PATH 里 → 加一行：export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
   fi
 fi
 
@@ -265,6 +280,11 @@ else
   if "${R[@]}" bridge --spec --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print("  bridge：能力",len(d["capabilities"]),"个")' 2>/dev/null; then :; else warn '  bridge：契约读取失败'; fi
 fi
 
+if [ "${ENTRY_FAILED:-0}" = "1" ]; then
+  printf '\n'
+  warn '入口软链未落成（上面有原因）→ 命令与桌面图标可能仍不可用；确认后用 --force 重跑本步'
+  exit 4
+fi
 printf '\n'
 say '完成。下一步：'
 cat <<EOF
