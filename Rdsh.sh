@@ -108,6 +108,7 @@
 #                                         #   会话数据（error）与绝对家目录/邮箱/大文件（warn）；
 #                                         #   报告不回显敏感值；必报"扫了几个文件"，0 个报 error；
 #                                         #   退出码 0 干净 / 1 有 warn / 2 有 error（--strict 把 warn 当 error）
+#   rdsh selfcheck                       # 三份命令清单（help/派发/契约）的一致性自检 + 外部能力接口检查
 #   rdsh help
 #
 # 状态账本（state，B1 起）—— 回答"谁是什么角色"，是 rdsh 唯一的权威状态源：
@@ -220,6 +221,107 @@ TAG_PREFIX="${RDSH_TAG_PREFIX:-dsh-v}"    # 远端 tag 命名：dsh-v<版本>
 log()  { printf '\033[1;34m[rdsh]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[rdsh!]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[rdsh!]\033[0m %s\n' "$*" >&2; exit 1; }
+# ---- 转发给附属脚本（统一入口）----
+# 为什么需要它：原来是裸 `exec "$MANAGE_ROOT/x.sh"`；脚本缺失时 bash 直接报
+# "没有那个文件或目录" + rc=127，分不清是 rdsh 的问题还是环境的问题（2026-10-08 调查发现）。
+forward_script() {  # <脚本绝对路径> [参数…]
+  local s="$1"; shift
+  if [ ! -f "$s" ]; then
+    die "附属脚本不存在：$s
+  常见原因：部署目录不完整（例如只拷贝了 Rdsh.sh），或 BASE/MANAGE_ROOT 指向不对。
+  排查：rdsh base（看根）、rdsh doctor（看环境）、确认该文件是否存在。"
+  fi
+  [ -x "$s" ] || die "附属脚本不可执行：$s（先执行 chmod +x \"$s\"）"
+  exec "$s" "$@"
+}
+
+# ---------------- 外部能力：第三方接入点（2026-10-08 起，接口版本 1）----------------
+# 约定（一句话）：把**可执行文件**放进该目录，它就是一个外部能力。
+#   1) 它执行 `<文件> --manifest`，输出：
+#        · 可选一行 `iface=<数字>`（接口版本，默认 1）
+#        · 若干**与内置同格式**的能力行（6 字段，`|` 分隔）：id|子命令|参数|风险|默认参数|简介
+#   2) 主脚本发现它 → 聚合进 `rdsh bridge --spec`（dsh 侧因此自动多出对应工具）与 `rdsh help`；
+#   3) `rdsh <子命令>` 命中它时被调用，调用时**显式传环境**（见 plugin_env），
+#      所以外部能力**不需要自己再解析一遍根目录**（老脚本里这件事被复制了 7 遍）。
+#   4) 失败一律**明确报错**：不存在 / 不可执行 / manifest 读不到或为空 / 接口版本不符 / id 撞名。
+RDSH_PLUGINS_DIR="${RDSH_PLUGINS_DIR:-$MANAGE_ROOT/plugins.d}"
+PLUGIN_IFACE_EXPECTED=1
+
+plugin_files() {
+  [ -d "$RDSH_PLUGINS_DIR" ] || return 0
+  find "$RDSH_PLUGINS_DIR" -maxdepth 1 -type f -perm -u+x 2>/dev/null | sort
+}
+
+plugin_manifest_of() {  # <文件> → 打印它的 manifest（失败即 die，绝不静默跳过）
+  local f="$1" out="" rc=0
+  [ -x "$f" ] || die "外部能力不可执行：$f"
+  out="$("$f" --manifest 2>&1)"; rc=$?
+  [ "$rc" = "0" ] || die "外部能力 $(basename "$f") 的 --manifest 退出码 $rc，读不到能力清单
+  它打印的是：$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+  [ -n "$out" ] || die "外部能力 $(basename "$f") 的 --manifest 没有任何输出（"没输出"不能当成"没有能力"）"
+  printf '%s\n' "$out"
+}
+
+plugin_iface_check() {  # 接口版本握手（不匹配 → 拒绝加载）
+  local f row v
+  for f in $(plugin_files); do
+    row="$(plugin_manifest_of "$f" | grep -m1 '^iface=' || true)"
+    v="${row#iface=}"; v="$(printf '%s' "${v:-1}" | tr -d '[:space:]')"; [ -n "$v" ] || v=1
+    [ "$v" = "$PLUGIN_IFACE_EXPECTED" ] || die "外部能力 $(basename "$f") 声明接口版本 $v，本机 rdsh 期望 $PLUGIN_IFACE_EXPECTED
+  → 拒绝加载。要么升级该能力，要么升级 rdsh（两边接口要一致）。"
+  done
+}
+
+plugin_rows() {  # 聚合所有外部能力的能力行（含字段数校验）
+  local f out row nf
+  for f in $(plugin_files); do
+    out="$(plugin_manifest_of "$f")"
+    while IFS= read -r row; do
+      case "$row" in ''|'#'*|iface=*) continue ;; esac
+      nf="$(printf '%s' "$row" | awk -F'|' '{print NF}')"
+      [ "$nf" = "6" ] || die "外部能力 $(basename "$f") 的能力行不是 6 字段（实际 $nf）：$row
+  → 字段里不能出现 '|'；格式见 $RDSH_PLUGINS_DIR/README.md"
+      printf '%s\n' "$row"
+    done <<< "$out"
+  done
+}
+
+plugin_env() {  # <能力 id> —— 把**已解析**的环境显式交给外部能力
+  export RDSH_CALLER="cli"
+  export RDSH_PLUGIN_ID="$1"
+  export RDSH_IFACE_VERSION="$PLUGIN_IFACE_EXPECTED"
+  export RDSH_SPEC_VERSION="$BRIDGE_SPEC_VERSION"
+  export RDSH_BASE="$BASE"
+  export RDSH_MANAGE_ROOT="$MANAGE_ROOT"
+  export RDSH_DATA_ROOT="$DATA_ROOT"
+  export RDSH_BACKUP_ROOT="$BACKUP_ROOT"
+  export RDSH_SHARED_ROOT="$SHARED_ROOT"
+  export RDSH_STATE_ROOT="$STATE_ROOT"
+  export RDSH_JOURNAL="$STATE_JOURNAL"
+  export RDSH_PATCHES_ROOT="$PATCHES_ROOT"
+  export RDSH_PLUGIN_ROOT="$PLUGIN_ROOT"
+  export RDSH_LOG_DIR="$LOG_DIR"
+}
+
+plugin_dispatch() {  # <子命令> [参数…] → 命中则 exec（不返回）；没命中返回 1
+  local sub="${1:-}" f out row rid rest rsc
+  [ -n "$sub" ] || return 1
+  for f in $(plugin_files); do
+    out="$(plugin_manifest_of "$f")"
+    while IFS= read -r row; do
+      case "$row" in ''|'#'*|iface=*) continue ;; esac
+      rid="${row%%|*}"; rest="${row#*|}"; rsc="${rest%%|*}"
+      if [ "$rsc" = "$sub" ] || [ "${rsc%% *}" = "$sub" ]; then
+        log "外部能力：$sub（$rid，来自 $(basename "$f")）"
+        plugin_env "$rid"
+        shift
+        exec "$f" "$@"
+      fi
+    done <<< "$out"
+  done
+  return 1
+}
+
 has_tty() { [ -t 0 ] || [ "${DSH_MENU:-0}" = "1" ]; }
 SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"   # 自杀式停止时要把自己投递到 systemd 单元
 
@@ -4013,7 +4115,9 @@ rdsh_trash_ls|trash ls||read||看回收站条目（时间/标签/体积/原因/�
 rdsh_trash_restore|trash restore|--last / <条目名> [--force]|write|--last --dry-run|按清单整份还原（退役与恢复的后路）；目标已存在会跳过，--force 才腾位
 rdsh_retire|retire|<目标…> [--apply] [--force]|destructive||退役一个版本（五类足迹）；**默认只出计划**，--apply 才动，--force 才碰回退基线/最后一版
 rdsh_restart|restart|[<目标>] [--dry-run] [--probe] [--wake <提示词>] [--session <会话id>]|destructive|--dry-run|重启当前 dsh（转发 rdsh-restart.sh）；--wake + --session 会在重启前登记「重启后继续做什么」；默认 dry-run，真重启要显式去掉
+rdsh_selfcheck|selfcheck||read||三份命令清单（help/派发/契约）一致性自检 + 外部能力接口检查
 ROWS
+  plugin_rows        # 外部能力（plugins.d/）追加进来；没有则不输出
 }
 
 cmd_bridge() {
@@ -4030,11 +4134,19 @@ cmd_bridge() {
   case "$sub" in
     spec|list)
       local id sc args risk def summary nf
+      local -a _seen_ids=()
+      plugin_iface_check
       # 自检：清单行必须正好 6 字段（参数里若写了 | 会静默错位——本文件就踩过）
       while IFS= read -r _row; do
         [ -n "$_row" ] || continue
         nf="$(printf '%s' "$_row" | awk -F'|' '{print NF}')"
         [ "$nf" = "6" ] || die "bridge 契约格式错误：期望 6 字段，实际 $nf —— $_row"
+        local _id="${_row%%|*}" _x
+        for _x in ${_seen_ids[@]+"${_seen_ids[@]}"}; do
+          [ "$_x" = "$_id" ] && die "能力 id 撞名：$_id
+  → 内置能力与外部能力不能同名；外部能力请用 x- 前缀（例如 x-session-archive）。"
+        done
+        _seen_ids+=("$_id")
       done < <(bridge_spec_rows)
       if [ "$json" = "1" ]; then
         # 用 jq 构造（**不要**用 printf 拼 JSON）：手写契约里的引号/反斜杠/换行都会被正确转义。
@@ -4539,13 +4651,70 @@ main() {
     bridge ) shift; cmd_bridge "$@" ;;
     selfupdate|self-update ) shift; cmd_selfupdate "$@" ;;
     wake ) shift; cmd_wake "$@" ;;
-    patch ) shift; exec "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器
-    doctor ) shift; exec "$MANAGE_ROOT/doctor.sh" "$@" ;;         # 转发到只读体检
-    scan|secrets ) shift; exec "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;  # 转发到隐私守卫
+    patch ) shift; forward_script "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器   # 转发到补丁管理器
+    doctor ) shift; forward_script "$MANAGE_ROOT/doctor.sh" "$@" ;;   # 转发到只读体检         # 转发到只读体检
+    scan|secrets ) shift; forward_script "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;   # 转发到隐私守卫  # 转发到隐私守卫
     fetch|download|dl ) shift; cmd_fetch "$@" ;;
+    selfcheck|check ) shift; cmd_selfcheck "$@" ;;
     help|-h|--help ) cmd_help ;;
     --dry-run|-n ) cmd_start "$@" ;;
-    * ) cmd_start "$@" ;;   # 其余参数一律当作 start 的目标
+    *) plugin_dispatch "$@" || cmd_start "$@" ;;   # 其余参数一律当作 start 的目标
   esac
 }
+
+# ---------------- selfcheck：三份清单的一致性自检 ----------------
+# 为什么需要：命令清单有**三份手写**（help 头块 / 派发 case / bridge 契约表），三者覆盖范围可以不同
+# （实测：patch 在 help 里但不在契约表里 → dsh 侧看不见它），而唯一的一致性校验在冒烟脚本里、且是**单向**的。
+#
+# 判据刻意**低噪声**：只报必须处理的；"只给人用、没进契约"的那批只汇总一行（否则真问题会被淹掉）。
+#   error ① help 里有、派发里没有 → 说明书撒谎
+#   error ② 契约表里有、派发里没有 → 契约撒谎（外部能力提供的子命令**算已派发**）
+#   info  ③ 派发里有、契约里没有   → 多数是"只给人用"的命令，正常
+cmd_selfcheck() {
+  local self="$SELF" lo hi
+  local help_list dispatch_list spec_list ext_list dispatch_all
+
+  help_list="$(sed -n '1,140p' "$self" | grep -oE '^#   rdsh [a-z][a-z0-9-]*' | awk '{print $3}' | sort -u)"
+  lo="$(grep -n '^  case "\$cmd" in' "$self" | tail -1 | cut -d: -f1)"
+  hi="$(awk -v s="$lo" 'NR>s && /^  esac$/{print NR; exit}' "$self")"
+  dispatch_list="$(sed -n "${lo},${hi}p" "$self" \
+    | sed -E 's/^    ""\|/    /' \
+    | grep -E '^    [a-z][a-z|_-]*[[:space:]]*\)' \
+    | sed -E 's/^    ([^)]*)\)[[:space:]]*.*/\1/' \
+    | tr '|' '\n' | tr -d ' ' | grep -v '^-' | grep . | sort -u)"
+  spec_list="$(bridge_spec_rows | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u)"
+  ext_list="$(plugin_rows | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u)"
+  dispatch_all="$(printf '%s\n%s\n' "$dispatch_list" "$ext_list" | grep . | sort -u)"
+
+  local n_help n_disp n_spec
+  n_help=$(printf '%s\n' "$help_list" | grep -c . || true)
+  n_disp=$(printf '%s\n' "$dispatch_all" | grep -c . || true)
+  n_spec=$(printf '%s\n' "$spec_list" | grep -c . || true)
+  printf '[selfcheck] 三份清单：help %s 条 / 派发 %s 条 / 契约 %s 条\n' "$n_help" "$n_disp" "$n_spec"
+  if [ "${n_help:-0}" -lt 5 ] || [ "${n_disp:-0}" -lt 5 ] || [ "${n_spec:-0}" -lt 5 ]; then
+    printf '[selfcheck] [error] 有清单几乎为空（解析失败？）→ 自检**不成立**，不得当作通过\n' >&2
+    return 2
+  fi
+
+  local err=0 x
+  local -a e1=() e2=() only_human=()
+  for x in $help_list; do printf '%s\n' "$dispatch_all" | grep -qx "$x" || e1+=("$x"); done
+  for x in $spec_list; do printf '%s\n' "$dispatch_all" | grep -qx "$x" || e2+=("$x"); done
+  [ "${#e1[@]}" -gt 0 ] && { printf '[selfcheck] [error] help 里有、派发里没有（说明书撒谎）：%s\n' "${e1[*]}"; err=1; }
+  [ "${#e2[@]}" -gt 0 ] && { printf '[selfcheck] [error] 契约表里有、派发里没有（契约撒谎）：%s\n' "${e2[*]}"; err=1; }
+  for x in $dispatch_list; do printf '%s\n' "$spec_list" | grep -qx "$x" || only_human+=("$x"); done
+  printf '[selfcheck] [info] 派发里 %s 个命令未进契约表（多数是"只给人用"的，正常）：%s\n' \
+    "${#only_human[@]}" "${only_human[*]:-无}"
+
+  local n_plugin; n_plugin="$(plugin_files | grep -c . || true)"
+  printf '[selfcheck] [info] 外部能力目录 %s（%s 个可执行文件）\n' "$RDSH_PLUGINS_DIR" "${n_plugin:-0}"
+  if [ "${n_plugin:-0}" -gt 0 ]; then
+    plugin_iface_check || err=1
+    printf '[selfcheck] 外部能力接口版本检查通过（期望 %s）\n' "$PLUGIN_IFACE_EXPECTED"
+  fi
+
+  if [ "$err" = 0 ]; then printf '[selfcheck] 结论：三份清单一致（"只给人用"的那批不算不一致）\n'; return 0
+  else printf '[selfcheck] 结论：有不一致，见上面 [error]\n' >&2; return 1; fi
+}
+
 main "$@"

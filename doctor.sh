@@ -458,9 +458,18 @@ dim_plugins() {
   say "  [ok]    权威副本 $ncanon 个"
   local sync="$MANAGE_ROOT/plugin-sync.sh" out nwarn
   if [ -f "$sync" ]; then
-    out="$(bash "$sync" --status 2>&1 || true)"
+    local rc=0
+    out="$(bash "$sync" --status 2>&1)"; rc=$?
     nwarn="$(printf '%s\n' "$out" | grep -c '⚠️' || true)"
-    if [ "${nwarn:-0}" -gt 0 ]; then
+    if [ "$rc" != 0 ]; then
+      # 2026-10-08 修的**假绿**：原来只看输出里有没有 ⚠️；脚本崩溃时没有 ⚠️，计数为 0，
+      # 于是被当成"各 home 与权威一致"。检查器静默失败却报绿，是最贵的一类 bug。
+      find_f error plugins "plugin-sync.sh --status 异常退出（rc=$rc）→ 一致性**无法判断**，不能当作一致"
+      say "  [error] plugin-sync.sh --status 退出码 $rc（输出尾部：$(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-140)）"
+    elif [ -z "$out" ]; then
+      find_f error plugins "plugin-sync.sh --status 没有任何输出 → 检查器静默失败，无法判断一致性"
+      say '  [error] plugin-sync.sh --status 无输出（检查器没干活）'
+    elif [ "${nwarn:-0}" -gt 0 ]; then
       find_f warn plugins "$nwarn 处 home 插件与权威副本不一致（细节：bash $MANAGE_ROOT/plugin-sync.sh --check；--sync 前先看方向守卫；有意的分叉可忽略）"
       say "  [warn]  $nwarn 处 home 插件与权威不一致"
     else

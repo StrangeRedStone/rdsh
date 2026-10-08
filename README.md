@@ -37,7 +37,7 @@
 | `rdsh fetch --list / <版本>` | 从 GitHub 列举 / 下载版本（默认 `git clone --depth 1`；`--tarball` 走归档，无 `.git`） |
 | `rdsh du [--purge <类>] [--older-than Nd] [--yes] [--force] [--json]` | **衍生物账本**：回收站 / 备份快照 / 调试沙箱 / fetch 临时 / 注册表陈旧 / 启动日志的体积与份数。**默认只列不删**；`--purge` 才是真删（备份类必须给 `--older-than`；回收项小于 `RDSH_TRASH_KEEP_DAYS`（默认 7 天）要 `--force`） |
 | `rdsh trash ls / restore <条目名\|--last> [--force]` | **回收站**（"永不 rm"的落点）：每个条目自带清单（原路径 / 体积 / 原因 / 逐项还原命令 / 跨设备标记）。`restore` 目标已存在则跳过不覆盖，`--force` 才腾位 |
-| `bootstrap.sh [--base <路径>] [--from <目录\|tarball>] [--with-dsh <版本>] [--dry-run]` | **蛋生鸡**：新机器上还没有 rdsh 时用它（独立可跑）。七步：依赖自检 → 取本体（clone / 离线）→ 建目录 → **写配置（只补缺键）** → 落 `rdsh` 入口软链 → 可选装一个 dsh → 三条只读命令验收。全程留日志 |
+| `bootstrap.sh [--base <路径>] [--from <目录\|tarball>] [--with-dsh <版本>] [--dry-run]` | **自举安装**：新机器上还没有 rdsh 时用它（独立可跑）。七步：依赖自检 → 取本体（clone / 离线）→ 建目录 → **写配置（只补缺键）** → 落 `rdsh` 入口软链 → 可选装一个 dsh → 三条只读命令验收。全程留日志 |
 | `rdsh selfupdate [--from <目录>] [--repo <url>] [--dry-run] [--quick]` | 更新 rdsh **自己**：备份回滚点 → 语法 + 隐私守卫 + 冒烟 → **原子替换**（临时名 + mv）→ 失败自动回滚。回滚点就是 `--from` 的 `.dsh-suite/backup/dsh-scripts-*` |
 | `rdsh bridge --spec [--json]` | **门面契约**：把 rdsh 的能力清单（id/子命令/参数/风险等级/默认参数）交给 dsh 插件。插件只是注册器 —— 加子命令不用改插件；危险能力的默认（dry-run / 只出计划）在契约里就定死 |
 | `rdsh restart [<目标>] [--dry-run] [--probe] [--delay N] [--force] [--log <文件>]` | 重启入口（转发 `rdsh-restart.sh`：systemd-run 逃逸舱 + 等端口释放 + 无人值守 headless 接手）。**输出落点会打印出来**（在 systemd 托管的 dsh 里，脚本按设计写日志文件而不是 stdout） |
@@ -158,7 +158,13 @@ rdsh start
 
 > `.installed` 写在检出里，所以 `rdsh` 会把它加进 `.git/info/exclude`（本地生效、不进上游）——否则它会污染 `git status`，动摇补丁工具的"干净树"前提。
 
-## 装到新机器（蛋生鸡，0.8.0 起）
+## 扩展 rdsh：外部能力（插件）
+
+把可执行文件放进 `plugins.d/`，它就成为 rdsh 的一条命令，并自动出现在 `rdsh bridge --spec`（dsh 侧 agent 因此能调用它）。**不必改 rdsh 代码。**
+完整格式（`--manifest`、环境变量契约、命名与报错行为）见 [`docs/外部能力.md`](docs/外部能力.md)；自检用 `rdsh selfcheck`。
+参考实现：`plugins.d/session-archive.sh`（会话历史档案库）。
+
+## 装到新机器（自举安装，0.8.0 起）
 
 新机器上还**没有** rdsh 时，用它自己的入口：
 

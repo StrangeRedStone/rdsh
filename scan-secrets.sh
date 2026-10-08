@@ -67,7 +67,10 @@ BIN_EXT_RE='\.(png|jpe?g|gif|webp|ico|bmp|woff2?|ttf|otf|eot|so|dylib|dll|exe|no
 is_binary_ext() { printf '%s' "$1" | grep -qiE "$BIN_EXT_RE"; }
 
 # 已知令牌形态（宁可窄一点，少误报）
-TOKEN_RE='(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.)'
+# 2026-10-08 修：每个前缀加**词边界**——原先 `sk-` 会命中 `ask-user-countdown` 这类
+#   普通连字符词（本项目补丁集名就叫这个），导致 E2 假 error 拦住正常提交。
+#   真密钥（行首/引号/冒号/等号后）仍然照抓，见 backup 下的双向验证。
+TOKEN_RE='((^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|(^|[^A-Za-z0-9_-])ghp_[A-Za-z0-9]{20,}|(^|[^A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}|(^|[^A-Za-z0-9_-])AKIA[0-9A-Z]{16}|(^|[^A-Za-z0-9_-])AIza[0-9A-Za-z_-]{30,}|(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.)'
 KEY_RE='-----BEGIN [A-Z ]*PRIVATE KEY-----'
 ENVSEC_RE='(API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|ACCESS_KEY|PRIVATE_KEY)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9/+_.:-]{16,}'
 HOMEPATH_RE='(/home/[a-z0-9_.-]+/|/Users/[A-Za-z0-9_.-]+/|C:\\Users\\)'

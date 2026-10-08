@@ -12,7 +12,8 @@
 # 口径（重要）：
 #   - 参与比对的 = 代码：package.json / lib/ / src/ 等
 #   - **排除** node_modules/（那是指向具体检出的软链，天生按版本不同）
-#   - **排除** contracts.json（它是"本 home 验证过哪些版本"的记录，各 home 本就不同）
+#   - **排除** contracts.json*（它是"本 home 验证过哪些版本"的记录，各 home 本就不同；
+#     `contracts.json.bak-*` 是覆盖前的人工备份，同样不算"代码"，也不参与 mtime 守卫）
 #
 # 用法:
 #   plugin-sync.sh --check                 # 只读：列出各 home 与权威副本的差异
@@ -21,6 +22,10 @@
 #   plugin-sync.sh --init [<版本>]         # 首次建立权威副本（默认取最新版本 home）
 #   plugin-sync.sh --status                # 一览：各 home 的插件与权威的关系
 #   通用选项: --dry-run / --base <目录>（覆盖 $BASE）
+#
+# 冻结声明（2026-10-01 加）：`<home>/plugins/.frozen` 存在 = 该 home 的插件副本是"当时那一版"的
+#   凝固件（旧回退 home），与权威副本不同**属于设计** → --check/--sync 都跳过它并在输出里说明。
+#   0.1.3-alpha.2 与 0.1.6-alpha.1 已声明冻结（此前 --check 每次报"9 处不一致"，其实是这两个旧 home）。
 #
 # 环境: RDSH_BASE / RDSH_MANAGE_ROOT / RDSH_DATA_ROOT / RDSH_BACKUP_ROOT / RDSH_CONFIG
 # =============================================================================
@@ -106,22 +111,41 @@ plugin_names() {  # 某个 plugins 目录下的插件名（排除 . 开头与 se
   done
 }
 
-# 目录内最新文件的时间戳（用于"目标比权威更新"的守卫）
-newest_mtime() {
-  find "$1" -type f -not -path '*/node_modules/*' -printf '%T@\n' 2>/dev/null | sort -n | tail -1
+# 该 home 是否被声明为"冻结"：旧回退 home 里的插件副本是**当时那一版**的凝固件，
+# 与权威副本不同属于设计（不是分叉）——放 `<home>/plugins/.frozen` 即声明，比对/同步都跳过。
+# 为什么需要它：0.1.3/0.1.6 两个旧 home 的插件比权威老得多，--check 每次报"9 处不一致"，
+# 反复解释"旧 home 不用补"；marker 把这个判断固化下来，也让"谁冻结了、为什么"有据可查。
+is_frozen() {  # <home>
+  [ -f "$1/plugins/.frozen" ]
 }
 
-# 代码摘要：排除 node_modules 与 contracts.json
+# 目录内最新文件的时间戳（用于"目标比权威更新"的守卫）
+# 排除 contracts.json* —— 它是各 home 自己的记录，mtime 新不代表"代码更新"（否则守卫会误跳过）
+newest_mtime() {
+  find "$1" -type f -not -path '*/node_modules/*' -not -name 'contracts.json*' -printf '%T@\n' 2>/dev/null | sort -n | tail -1
+}
+
+# 代码摘要：排除 node_modules 与 contracts.json*（含 contracts.json.bak-YYYYMMDD-HHMMSS 历史残留）
 digest() {
   local dir="$1"
   [ -d "$dir" ] || { printf 'MISSING'; return; }
-  ( cd "$dir" && find . -type f -not -path './node_modules/*' -not -name 'contracts.json' -print0 \
+  ( cd "$dir" && find . -type f -not -path './node_modules/*' -not -name 'contracts.json*' -print0 \
       | sort -z | xargs -0 sha256sum 2>/dev/null | sha256sum | cut -c1-12 )
+}
+# 代码差异计数（判据与 --check 完全同源）：只数「内容不同」与「权威有、目标缺」，
+# **不算**「目标独有文件」—— 目标多出的历史残留由 --check 明确承诺"保留，不删"。
+# 用途：让 --sync / --status 的判据与 --check 一致（此前用 digest，会把目标独有的
+# .bak 文件算成"不一致"，导致 --check 说 ✅ 而 --sync 每次照样备份+覆盖，永不幂等）。
+code_diff_count() {  # <canon> <home>
+  local a="$1" b="$2"
+  [ -d "$b" ] || { printf '999999'; return; }
+  LC_ALL=C diff -rq --exclude=node_modules --exclude='contracts.json*' "$a" "$b" 2>/dev/null \
+    | grep -cE '^Files |^Only in '"$a" || true
 }
 # 差异明细（同样口径）
 diff_files() {
   local a="$1" b="$2"
-  diff -rq --exclude=node_modules --exclude=contracts.json "$a" "$b" 2>/dev/null | sed 's/^/      /' || true
+  diff -rq --exclude=node_modules --exclude='contracts.json*' "$a" "$b" 2>/dev/null | sed 's/^/      /' || true
 }
 
 show_status() {
@@ -138,11 +162,12 @@ show_status() {
   local v h
   for v in $(versions); do
     h="$(home_of "$v")" || continue
+    if is_frozen "$h"; then printf '  %-18s %s  【已冻结：按设计不与权威同步】\n' "$v" "$h/plugins"; continue; fi
     printf '  %-18s %s\n' "$v" "$h/plugins"
     local p
     for p in $(plugin_names "$h/plugins"); do
       if [ ! -d "$CANON/$p" ]; then printf '    %-14s ⚠️ 权威副本里没有\n' "$p"; continue; fi
-      if [ "$(digest "$CANON/$p")" = "$(digest "$h/plugins/$p")" ]; then
+      if [ "$(code_diff_count "$CANON/$p" "$h/plugins/$p")" = "0" ]; then
         printf '    %-14s ✅ 一致\n' "$p"
       else
         printf '    %-14s ⚠️ 与权威不同\n' "$p"
@@ -154,10 +179,11 @@ show_status() {
 
 cmd_check() {
   [ -d "$CANON" ] || die "权威副本不存在：$CANON（先跑 --init）"
-  step "一致性检查（口径：代码；排除 node_modules/ 与 contracts.json/）"
-  local v h p drift=0 checked=0 homes=0
+  step "一致性检查（口径：代码；排除 node_modules/ 与 contracts.json*/）"
+  local v h p drift=0 checked=0 homes=0 frozen=0
   for v in $(versions); do
     h="$(home_of "$v")" || continue
+    if is_frozen "$h"; then printf '  %s（已冻结：按设计不与权威同步，跳过比对 —— 理由见 %s/plugins/.frozen）\n' "$v" "$h"; frozen=$((frozen+1)); continue; fi
     printf '  %s\n' "$v"; homes=$((homes+1))
     for p in $(plugin_names "$h/plugins"); do
       checked=$((checked+1))
@@ -167,7 +193,7 @@ cmd_check() {
       else
         # 用 LC_ALL=C 让 diff 输出可机器判读；三类严格区分（多出文件不算"不一致"）
         local d content extras missingFiles
-        d="$(LC_ALL=C diff -rq --exclude=node_modules --exclude=contracts.json "$CANON/$p" "$h/plugins/$p" 2>/dev/null || true)"
+        d="$(LC_ALL=C diff -rq --exclude=node_modules --exclude='contracts.json*' "$CANON/$p" "$h/plugins/$p" 2>/dev/null || true)"
         content=$(printf '%s\n' "$d" | grep -c '^Files ' || true)
         extras=$(printf '%s\n' "$d" | grep -c "^Only in $h/plugins/$p" || true)
         missingFiles=$(printf '%s\n' "$d" | grep -c "^Only in $CANON/$p" || true)
@@ -190,12 +216,13 @@ cmd_check() {
   for p in $(plugin_names "$CANON"); do
     for v in $(versions); do
       h="$(home_of "$v")" || continue
+      is_frozen "$h" && continue
       [ -d "$h/plugins/$p" ] || missing="$missing $v/$p"
     done
   done
   [ -n "$missing" ] && warn "以下 home 缺插件（较新版本才有的；回退用的旧 home 通常**不需要**补）：$missing"
   echo
-  log "共检查 $checked 个插件副本（$homes 个 home）"
+  log "共检查 $checked 个插件副本（$homes 个 home${frozen:+；另有 $frozen 个已冻结 home 跳过}）"
   if [ "$checked" = "0" ]; then
     warn '⚠️ 一个对象都没检查到 —— 这通常意味着版本识别或目录结构不对，**不能当作通过**'
     return 0
@@ -219,11 +246,14 @@ cmd_sync() {
   local v h p dst bak
   for v in "${list[@]}"; do
     h="$(home_of "$v")" || die "找不到该版本的数据目录：$v"
+    if is_frozen "$h"; then warn "$v 已冻结（$h/plugins/.frozen）：跳过同步；要改就先删那个 marker"; continue; fi
     printf '  %s（%s）\n' "$v" "$h"
     for p in $(plugin_names "$CANON"); do
       [ -d "$CANON/$p" ] || continue
       dst="$h/plugins/$p"; bak="$BACKUP_ROOT/plugin-sync-$ts/$v/$p"
-      if [ -d "$dst" ] && [ "$(digest "$CANON/$p")" = "$(digest "$dst")" ]; then printf '    %-14s = 已一致\n' "$p"; continue; fi
+      if [ -d "$dst" ] && [ "$(code_diff_count "$CANON/$p" "$dst")" = "0" ]; then
+        printf '    %-14s = 代码一致（目标独有文件保留，不覆盖）\n' "$p"; continue
+      fi
       # 守卫：目标里有比权威副本更新的文件（常见于"在某个 home 里直接改好并部署"）→ 默认不覆盖
       if [ -d "$dst" ] && [ "$FORCE" != "1" ]; then
         t_new="$(newest_mtime "$dst")"; c_new="$(newest_mtime "$CANON/$p")"
@@ -239,7 +269,10 @@ cmd_sync() {
       [ -d "$dst" ] && cp -a "$dst" "$bak"
       mkdir -p "$dst"
       cp -a "$CANON/$p/." "$dst/"          # 覆盖同名文件；不动 node_modules（权威里没有它）
-      printf '    %-14s ✅ 已同步（校验和 %s）\n' "$p" "$(digest "$dst")"
+      # contracts.json 是"本 home 验证过哪些版本"的记录（本脚本口径里明确排除比对）→ 已有则原样恢复；
+      # 目标原本没有才落权威那份（保留"新 home 靠 --sync 拿到一份"的行为）。目标独有的 .bak 本就不会被删。
+      if [ -f "$bak/contracts.json" ]; then cp -a "$bak/contracts.json" "$dst/contracts.json"; fi
+      printf '    %-14s ✅ 已同步（剩余代码差异 %s）\n' "$p" "$(code_diff_count "$CANON/$p" "$dst")"
     done
   done
   [ "$DRY" = "1" ] || log "备份根：$BACKUP_ROOT/plugin-sync-$ts"

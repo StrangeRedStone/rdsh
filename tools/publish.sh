@@ -17,7 +17,7 @@ FROM="${RDSH_PUBLISH_FROM:-$HOME/Mapp/dsh}"    # 本机工作目录
 MODE=""
 DRY=0
 nfiles() { printf '%s\n' $FILES | wc -l; }   # 白名单文件数（不要用 printf '%s' $FILES | wc -w —— 多参不分离）
-# 守卫位置：仓库里优先，其次本机权威副本（首次发布时仓库里还没有它 —— 鸡生蛋）
+# 守卫位置：仓库里优先，其次本机权威副本（首次发布时仓库里还没有它：要先有脚本才能发布脚本）
 SCAN="$SELF_DIR/scan-secrets.sh"
 [ -f "$SCAN" ] || SCAN="$FROM/scan-secrets.sh"
 

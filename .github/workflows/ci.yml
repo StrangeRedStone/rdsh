@@ -65,7 +65,7 @@ jobs:
           set -e
           bash tools/smoke-backup-restore.sh ./Rdsh.sh
 
-      - name: 功能冒烟（蛋生鸡：bootstrap + selfupdate）
+      - name: 功能冒烟（自举安装：bootstrap + selfupdate）
         run: |
           set -e
           bash tools/smoke-bootstrap.sh .
