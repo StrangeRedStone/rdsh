@@ -35,17 +35,18 @@ expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$H
 BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
 MANAGE_ROOT="$(expand_tilde "${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}")"
 if [ -z "$MANAGE_ROOT" ]; then
-  MANAGE_ROOT="$BASE/dsh"
+  MANAGE_ROOT="$BASE/rdsh"
+  if [ ! -f "$MANAGE_ROOT/doctor.sh" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ] && [ -f "$BASE/dsh/Rdsh.sh" ]; then MANAGE_ROOT="$BASE/dsh"; fi
   if [ ! -f "$MANAGE_ROOT/doctor.sh" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
     _self="$(dirname "$(readlink -f "$0")")"
     [ -f "$_self/doctor.sh" ] && MANAGE_ROOT="$_self"
   fi
 fi
-DATA_ROOT="$(expand_tilde "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")";     [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh"
-BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
-SHARED_ROOT="$(expand_tilde "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"; [ -n "$SHARED_ROOT" ] || SHARED_ROOT="$BASE/.dsh-shared"
-PLUGIN_ROOT="$(expand_tilde "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")";  [ -n "$PLUGIN_ROOT" ] || PLUGIN_ROOT="$BASE/dsh-plugins"
-LOG_DIR="$(expand_tilde "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")";           [ -n "$LOG_DIR" ]     || LOG_DIR="$BASE/.dsh-logs"
+DATA_ROOT="$(expand_tilde "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")";     [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh-suite/data"
+BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
+SHARED_ROOT="$(expand_tilde "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"; [ -n "$SHARED_ROOT" ] || SHARED_ROOT="$BASE/.dsh-suite/shared"
+PLUGIN_ROOT="$(expand_tilde "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")";  [ -n "$PLUGIN_ROOT" ] || PLUGIN_ROOT="$BASE/.dsh-suite/plugins"
+LOG_DIR="$(expand_tilde "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")";           [ -n "$LOG_DIR" ]     || LOG_DIR="$BASE/.dsh-suite/logs"
 STATE_ROOT="$(expand_tilde "${RDSH_STATE_ROOT:-$(cfg_get STATE_ROOT)}")"; [ -n "$STATE_ROOT" ] || STATE_ROOT="$BASE/.dsh-suite/state"
 RUN_DIR="$(expand_tilde "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")";          [ -n "$RUN_DIR" ]     || RUN_DIR="$BASE/.dsh-suite/run"
 DEBUG_ROOT="$(expand_tilde "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"; [ -n "$DEBUG_ROOT" ] || DEBUG_ROOT="$BASE/.dsh-suite/debug"

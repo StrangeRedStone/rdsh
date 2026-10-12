@@ -5,7 +5,7 @@
 # 背景：设置页那层改动是**打补丁进检出内置包**（用户决议 D4）。升级会换检出目录，
 # 所以补丁必须能被"重放"，且**冲突时要停手**、绝不半应用把检出改坏。
 #
-# 补丁仓库布局（默认 $BASE/dsh-patches/，$BASE 默认 ~/Mapp）：
+# 补丁仓库布局（默认 $BASE/.dsh-suite/patches/，$BASE 默认 ~/Mapp）：
 #   manifest.yaml          # 补丁集清单：顺序、涉及路径、基线与重建命令
 #   <集名>/
 #     ├── 0001-xxx.patch   # 按文件名顺序应用
@@ -28,7 +28,7 @@
 #   patch-manager.sh export [集名] [--repo R] [--patches P] [--note 说明]
 #
 # 安全底线：
-#   * apply/revert 前把涉及文件备份到 $BASE/.dsh-backup/patches-<时间戳>/；
+#   * apply/revert 前把涉及文件备份到 $BASE/.dsh-suite/backup/patches-<时间戳>/；
 #   * 任一补丁失败 → 回滚本次已应用的补丁并退出（检出保持原样）；
 #   * 不删除任何绝对路径；不用 pkill/pgrep -f。
 #
@@ -77,11 +77,11 @@ BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="
 # 补丁仓与备份根都可覆盖：命令行 --patches > 环境变量 > 配置文件 > $BASE 下的默认位置
 if [ -z "$PATCHES" ]; then
   PATCHES="$(expand_tilde "${RDSH_PATCHES:-$(cfg_get PATCHES)}")"
-  [ -n "$PATCHES" ] || PATCHES="$BASE/dsh-patches"
+  [ -n "$PATCHES" ] || PATCHES="$BASE/.dsh-suite/patches"
 fi
 MANIFEST="$PATCHES/manifest.yaml"
 BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"
-[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
+[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
 TS="$(date +%Y%m%d-%H%M%S)"
 
 command -v python3 >/dev/null || die "需要 python3 解析 manifest.yaml"

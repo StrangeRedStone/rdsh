@@ -3,15 +3,17 @@
 > 让一台机器上**并存多个 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）版本**成为常规操作：每版本独立数据根，升级 / 回退 / 插件 / 补丁都有工具兜底。
 >
 > 本仓库是作者机器上实际运行、逐条实测过的脚本集合；不是设计稿。
+>
+> **先看这一句**：rdsh 是给「**已经在用 dsh、想在一台机器上管理多个版本**」的人用的。如果你只是想跑一个 dsh，直接用 `pnpm dlx @deepseek-ai/dsh web` 就行，**不需要本工具**。
 
 ## 它解决什么
 
 | 痛点 | rdsh 的做法 |
 |---|---|
 | 换一个 dsh 版本 = 一次高风险手工搬迁 | `migrate.sh` 一条命令：备份 → 建链 → 搬数据 → 装插件 → 探针 → 记回退基线 |
-| 多版本并行时数据互相污染 | 每个版本独立 `DSH_HOME`（`$BASE/.dsh/<版本>/`） |
+| 多版本并行时数据互相污染 | 每个版本独立 `DSH_HOME`（`$BASE/.dsh-suite/data/<版本>/`） |
 | 与版本无关的作者资产（skills / lessons / AGENTS）在版本间分叉 | 外置到**稳定根** `$BASE/.dsh-shared/`，各版本 home 内只建软链 |
-| 插件代码在新旧版本各存一份、修一处另一处不变 | **权威副本** `$BASE/dsh-plugins/` + `plugin-sync.sh`（带方向守卫） |
+| 插件代码在新旧版本各存一份、修一处另一处不变 | **权威副本** `$BASE/.dsh-suite/plugins/` + `plugin-sync.sh`（带方向守卫） |
 | 升级换了检出，打过的补丁全丢 | `patch-manager.sh` 重放补丁，冲突即停手、绝不半应用 |
 | 升级后想回退但没有基线 | 每次迁移把「源/目标/备份/还原命令/探针结论」追加进 `回退基线.md` |
 
@@ -99,13 +101,14 @@ $BASE/
 ## 快速开始
 
 ```bash
-# 1) 本仓库按设计要落在 $BASE/dsh（默认 ~/Mapp/dsh）——与检出同目录
-git clone <repo-url> ~/Mapp/dsh
-chmod +x ~/Mapp/dsh/*.sh
+# 0) 依赖：node + pnpm。注意 **pnpm 不在 bootstrap 的依赖自检里**，要先自己装好
+# 1) 本仓库落在检出根 $BASE/rdsh（BASE 默认 $HOME/Mapp；见下方"配置"）
+git clone <repo-url> ~/dsh/rdsh
+chmod +x ~/dsh/rdsh/*.sh
 
 # 2) 装一个入口命令
 mkdir -p ~/.local/bin
-ln -s ~/Mapp/dsh/Rdsh.sh ~/.local/bin/rdsh
+ln -s ~/dsh/rdsh/Rdsh.sh ~/.local/bin/rdsh
 
 # 3) 看看有什么版本可下
 rdsh fetch --list
@@ -117,7 +120,21 @@ rdsh fetch 0.1.6-alpha.1 --install
 rdsh start
 ```
 
-> 想把数据放到别处？`rdsh base ~/mydsh` 只改指向、不搬数据。也可以直接设环境变量 `RDSH_BASE`。
+> **想换位置**：rdsh 是**单一旋钮**——`rdsh base <新BASE>`、环境变量 `RDSH_BASE`、或配置文件里的一行 `BASE=` 决定一切：检出根 `$BASE/rdsh`，数据/资产/备份/日志/插件全在 `$BASE/.dsh-suite/*`。改指向**不搬数据**。
+> **新机器**上还没有 rdsh 时用 `bash bootstrap.sh --base <路径>`（未指定且是交互终端时**会先问一句**；`--yes` 跳过）。
+
+## 退出码
+
+**机器可判**，按命令族区分：
+
+| 命令族 | 退出码 |
+|---|---|
+| `run` / `start` | **0** 全部实例已确认就绪 · **1** 有实例**没起来**（投递失败/端口被占） · **3** 已投递、但未在 `--timeout` 内**确认就绪**（单元仍在后台跑 → 用 `rdsh status` 或 `ss -ltnp` 确认） |
+| `doctor` | **0** 干净 · **1** 有 warn · **2** 有 error（`--strict` 把 warn 当 error） |
+| `migrate` / `restore` / `retire` | **0** 无发现 · **1** 有 warn · **2** 有 error（= 最高严重度） |
+| `bootstrap.sh` | **0** 成功 · **4** 入口没落成（其余步骤照跑，让用户看到全貌） |
+
+> 为什么 `run` 超时是 3 而不是 0：这条命令的契约是「**确认就绪**才算成功」。没确认就报 0 = 假阳性验收；而和"真的没成"共用 1 又让调用方分不清——所以给一个专用码（2026-10-12 改）。
 
 ## 配置
 
@@ -126,12 +143,12 @@ rdsh start
 | 变量 | 默认 | 含义 |
 |---|---|---|
 | `RDSH_BASE` | `$HOME/Mapp` | 唯一旋钮，下列默认值都从它派生 |
-| `RDSH_MANAGE_ROOT` | `$BASE/dsh` | 检出根 |
-| `RDSH_DATA_ROOT` | `$BASE/.dsh` | 数据根 |
-| `RDSH_BACKUP_ROOT` | `$BASE/.dsh-backup` | 备份根 |
-| `RDSH_SHARED_HOME` | `$BASE/.dsh-shared` | 作者资产稳定根 |
-| `RDSH_PLUGIN_ROOT` | `$BASE/dsh-plugins` | 插件权威副本 |
-| `DSH_LOG_DIR` | `$BASE/.dsh-logs` | 启动日志目录 |
+| `RDSH_MANAGE_ROOT` | `$BASE/rdsh` | 检出根（经典布局 `$BASE/dsh` 自动回退） |
+| `RDSH_DATA_ROOT` | `$BASE/.dsh-suite/data` | 数据根（每版本一个 home） |
+| `RDSH_BACKUP_ROOT` | `$BASE/.dsh-suite/backup` | 备份根 |
+| `RDSH_SHARED_HOME` | `$BASE/.dsh-suite/shared` | 作者资产稳定根 |
+| `RDSH_PLUGIN_ROOT` | `$BASE/.dsh-suite/plugins` | 插件权威副本 |
+| `DSH_LOG_DIR` | `$BASE/.dsh-suite/logs` | 启动日志目录 |
 | `RDSH_TRASH` | `$BASE/.dsh-suite/trash` | 回收站根。**默认与 `BASE` 同文件系统** —— 跨设备 `mv` 会退化成"复制+删除"（慢、瞬时双份占用），旧默认 `/tmp` 还可能是 tmpfs（≈内存） |
 | `RDSH_TRASH_KEEP_DAYS` | `7` | 回收项小于这个天数时，`du --purge trash` 需要 `--force` |
 | `RDSH_STATE_ROOT` | `$BASE/.dsh-suite/state` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
@@ -170,7 +187,7 @@ rdsh start
 
 ```bash
 # 1) 取到本体（离线可用 --from <已 clone 的目录|tarball>）
-bash bootstrap.sh --base ~/Mapp
+bash bootstrap.sh --base "$BASE"
 
 # 2) 顺手装一个 dsh（可选）
 bash bootstrap.sh --with-dsh latest
@@ -187,8 +204,8 @@ bash bootstrap.sh --with-dsh latest
 **rdsh 是便利层，不是唯一启动路径。** dsh 本体与每版本数据 home 都在磁盘上，任何时候都能手工起：
 
 ```bash
-cd <检出>                                          # 例：~/Mapp/dsh/deepseek-harness-dsh-0.1.7-rc.2
-DSH_HOME=~/Mapp/.dsh-suite/data/<对象键> pnpm dsh web --port 3080
+cd "$BASE/rdsh/<检出>"                              # 例：$BASE/rdsh/deepseek-harness-dsh-0.2.0-rc.2
+DSH_HOME="$BASE/.dsh-suite/data/<对象键>" pnpm dsh web --port 3080
 ```
 
 裸启动**比 rdsh 少做四件事**：注入 `DSH_HOME`、`ensure_data_home`（首播/建链）、`ensure_built`（install+build）、`registry_put`（实例注解）。所以裸启动最常见的症状是"**找不到自定义的数据目录 / 会话看起来全空**"——数据没丢，只是落到了默认 home。
@@ -196,7 +213,7 @@ DSH_HOME=~/Mapp/.dsh-suite/data/<对象键> pnpm dsh web --port 3080
 - 找数据 home 三条路：`rdsh base`／账本 `versions.kv` 的 `key` 列／检出内 `.installed` 的 `key=`
 - 自查入口链：`rdsh doctor --only entry`（rdsh 命令、`<检出>/rdsh`、桌面图标 `Exec`、PATH）
 - 把 rdsh 装回来：`bash bootstrap.sh`（联网）或 `bash bootstrap.sh --from <目录|tarball>`（离线）
-- 完整版：[docs/应急启动.md](docs/应急启动.md)（机器上也有一份 `~/Mapp/dsh/应急启动.md`）
+- 完整版：[docs/应急启动.md](docs/应急启动.md)（机器上也有一份 `$BASE/rdsh/应急启动.md`）
 
 ## 一个门面（0.9.2 起）
 
@@ -278,12 +295,12 @@ DSH_HOME=~/Mapp/.dsh-suite/data/<对象键> pnpm dsh web --port 3080
 
 ## 维护者：本机工作目录 ↔ 发布仓库
 
-本仓库是**发布快照**；日常在用的真身放在本机工作目录里（默认 `~/Mapp/dsh/`）。那个目录同时还放着 dsh 的检出（上游代码，6G+），**所以绝不能把整个目录当仓库**。
+本仓库是**发布快照**；日常在用的真身放在**检出根**（默认 `$BASE/rdsh/`）。那个目录同时还放着 dsh 的检出（上游代码，6G+），**所以绝不能把整个目录当仓库**。
 
 两者关系是**单向**的：本机是权威，仓库只是发布目标。
 
 ```bash
-# 1) 在 ~/Mapp/dsh 里改脚本（跟平时一样）
+# 1) 在 $BASE/rdsh 里改脚本（跟平时一样）
 # 2) 看差异（只读，有差异时退出码 1）
 bash tools/publish.sh --check
 # 3) 把白名单文件集中进仓库

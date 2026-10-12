@@ -64,7 +64,7 @@ cfg_get() {
 }
 expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
 BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
-LOG_DIR="$(expand_tilde "${DSH_RESTART_LOGDIR:-${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}}")"; [ -n "$LOG_DIR" ] || LOG_DIR="$BASE/.dsh-logs"
+LOG_DIR="$(expand_tilde "${DSH_RESTART_LOGDIR:-${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}}")"; [ -n "$LOG_DIR" ] || LOG_DIR="$BASE/.dsh-suite/logs"
 MANAGE_ROOT="$(expand_tilde "${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}")"
 if [ -z "$MANAGE_ROOT" ]; then
   MANAGE_ROOT="$BASE/dsh"
@@ -352,12 +352,30 @@ PYEOF
 
   local unit="dsh-wake-$TS"
   log "用 headless 跨进程接手：session=$sid（unit=$unit）"
-  systemd-run --user --unit="$unit" --collect \
+  if ! systemd-run --user --unit="$unit" --collect \
     --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=DSH_HOME="${NEW_HOME:-}" \
     --working-directory="$NEW_DIR" \
-    "$(command -v pnpm)" dsh --profile headless --session-id "$sid" "$prompt" >/dev/null 2>&1 \
-    && log "兜底已投递（日志：journalctl --user -u $unit）" \
-    || warn "兜底投递失败；台账保留，可手工执行：cd $NEW_DIR && pnpm dsh --profile headless --session-id $sid \"$prompt\""
+    "$(command -v pnpm)" dsh --profile headless --session-id "$sid" "$prompt" >/dev/null 2>&1; then
+    warn "兜底投递失败；台账保留，可手工执行：cd $NEW_DIR && pnpm dsh --profile headless --session-id $sid \"$prompt\""
+    return 0
+  fi
+  # 2026-10-12 修：**投递成功 ≠ 接手成功**。一次性 runner 对"由预设组成的会话"会直接失败
+  # （实测报 "runs under agent preset cordis, which the one-shot runner does not compose"），
+  # 而它的输出只进 journal —— 于是旧版在这里静默"已投递"，实际飞轮没转。
+  # 现在等一小会儿判定结果：失败就在重启日志里**明说**，并保留台账（不吞掉）。
+  local state="" i
+  for i in $(seq 1 20); do
+    sleep 1
+    if systemctl --user is-failed "$unit" >/dev/null 2>&1; then state=failed; break; fi
+    systemctl --user is-active "$unit" >/dev/null 2>&1 || { state=finished; break; }
+  done
+  if [ "$state" = "failed" ]; then
+    warn "⚠️ 兜底接手**失败**（台账已保留）：$(journalctl --user -u "$unit" --no-pager 2>/dev/null | tail -1 | cut -c1-200)"
+    warn "→ 该会话无法用 headless 兜底接手（常见原因：会话由 agent preset 组成，一次性 runner 不支持）。"
+    warn "→ 请**在 Web 里手动继续**这个会话（刷新 http://127.0.0.1:$PORT/ 即可看到它），台账留着不影响。"
+  else
+    log "兜底已投递，未见失败（unit=$unit，状态=$state；日志：journalctl --user -u $unit）"
+  fi
 }
 wake_fallback
 

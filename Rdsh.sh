@@ -4,14 +4,15 @@
 #
 # 目录布局（根由单一旋钮 BASE 决定，默认 $HOME/Mapp；`rdsh base $HOME` 可改成 ~/dsh + ~/.dsh）：
 #   基目录   : $BASE                            （环境 RDSH_BASE / 配置 ~/.config/rdsh/config 可覆盖）
-#   代码检出 : $BASE/dsh/<检出目录>/            （本脚本同目录，自动扫描子目录）
-#   数据根   : $BASE/.dsh/<版本号>/             （每版本独立 DSH_HOME；版本号取 package.json）
-#   作者资产根: $BASE/.dsh-shared/              （与版本无关的 skills/lessons.md/AGENTS.md/.agent-presets/
+#   代码检出 : $BASE/dsh/<检出目录>/            （本脚本同目录，自动扫描子目录；
+#                                               可用配置 MANAGE_ROOT / 环境 RDSH_MANAGE_ROOT 换成别的目录）
+#   数据根   : $BASE/.dsh-suite/data/<版本号>/   （每版本独立 DSH_HOME；版本号取 package.json）
+#   作者资产根: $BASE/.dsh-suite/shared/        （与版本无关的 skills/lessons.md/AGENTS.md/.agent-presets/
 #                                               facts.md/backlog.md；各版本 home 内以软链共享，不复制）
-#   备份根   : $BASE/.dsh-backup/               （rdsh backup / migrate.sh 的落点）
-#   启动日志 : $BASE/.dsh-logs/                 （含访问 token，目录 700 / 文件 600）
+#   备份根   : $BASE/.dsh-suite/backup/         （rdsh backup / migrate.sh 的落点）
+#   启动日志 : $BASE/.dsh-suite/logs/           （含访问 token，目录 700 / 文件 600）
 #   实例注册表: $BASE/.dsh-suite/run/           （instances/<端口>.kv；只是注解，真相是 ss + /proc）
-#   映射文件 : $BASE/dsh/.map                   （可选，可手改）
+#   映射文件 : $MANAGE_ROOT/.map                （可选，可手改）
 #       行格式 dir|<检出目录名>|<数据目录>     —— 该检出的数据目录改指（如未迁移的 rc.2）
 #               ext|<绝对路径>|<数据目录>      —— 登记一个"本体不动、仅数据隔离"的外部检出
 #   相关工具 : migrate.sh（同目录）             —— 跨版本迁移器：备份 + 建链 + 探针 + 回退基线
@@ -27,6 +28,8 @@
 #       --no-open | --open                #   是否自动开浏览器（多目标时默认不开）
 #       --dry-run                         #   只打印计划；--no-log 关启动日志
 #                                         #   同一 DSH_HOME 已在跑 → 拒绝（多开会互相写 workspace）
+#                                         #   退出码：0 全部确认就绪 / 1 有实例没起来 / 3 已投递但未在
+#                                         #   --timeout 内确认就绪（单元仍在后台跑，用 rdsh status 确认）
 #   rdsh start ...                        # 同 run（兼容别名，rdsh-restart.sh 仍可用）
 #   rdsh add <检出路径> [--mode iso|link|body]
 #                                         # 手动把检出纳入管理；同 run <新路径> 的询问
@@ -170,20 +173,22 @@ _patches="$(expand "${RDSH_PATCHES:-$(cfg_get PATCHES)}")"
 _mydsh="$(expand "${RDSH_MYDSH_REPO:-$(cfg_get MYDSH_REPO)}")"
 _plugin="$(expand "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")"
 
-MANAGE_ROOT="${_manage:-$BASE/dsh}"
-# 可移植性回退：未显式配置 MANAGE_ROOT，且 $BASE/dsh 不是本工具所在处时，改用脚本自身目录。
-# 这样 `git clone` 到任意目录后可直接跑；有既定布局（$BASE/dsh 里有 Rdsh.sh）时行为不变。
+MANAGE_ROOT="${_manage:-$BASE/rdsh}"
+# 经典布局兼容：未显式配置时，若 $BASE/rdsh 没有 Rdsh.sh 而 $BASE/dsh 有，用经典的 $BASE/dsh。
+# （2026-10-11：新布局收敛到 $BASE/{rdsh,.dsh-suite,coldD}，故默认改为 rdsh；老布局自动回退。）
+if [ -z "$_manage" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ] && [ -f "$BASE/dsh/Rdsh.sh" ]; then MANAGE_ROOT="$BASE/dsh"; fi
+# 可移植性回退：仍未找到时，改用脚本自身目录，这样 `git clone` 到任意目录后可直接跑。
 if [ -z "$_manage" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
   _self_dir="$(dirname "$(readlink -f "$0")")"
   if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
 fi
-DATA_ROOT="${_data:-$BASE/.dsh}"
-BACKUP_ROOT="${_backup:-$BASE/.dsh-backup}"
-SHARED_ROOT="${_shared:-$BASE/.dsh-shared}"
+DATA_ROOT="${_data:-$BASE/.dsh-suite/data}"
+BACKUP_ROOT="${_backup:-$BASE/.dsh-suite/backup}"
+SHARED_ROOT="${_shared:-$BASE/.dsh-suite/shared}"
 MAP_FILE="$MANAGE_ROOT/.map"
 LEGACY_HOME="$HOME/.dsh"                 # 旧单根布局：bootstrap 模板 + 模式3的默认数据位置
 WEB_LOG="${DSH_WEB_LOG:-1}"               # 1=dsh web 控制台输出同时落盘（事后可查插件/监听器报错）；0=关闭
-LOG_DIR="${_logdir:-$BASE/.dsh-logs}"     # 启动日志目录（内含访问 token，故目录 700 / 文件 600）
+LOG_DIR="${_logdir:-$BASE/.dsh-suite/logs}"     # 启动日志目录（内含访问 token，故目录 700 / 文件 600）
 RUN_DIR="${_run:-$BASE/.dsh-suite/run}"   # 实例注册表（注解层；真相仍是 ss + /proc）
 INSTANCES_DIR="$RUN_DIR/instances"        # 每实例一份 <端口>.kv
 WEB_PORT="${DSH_WEB_PORT:-3080}"          # 默认监听端口；run/start 的 --port 可覆写
@@ -204,8 +209,8 @@ BASELINE_MD="$BACKUP_ROOT/回退基线.md"     # 人读视图：由上面三者�
 TRASH_ROOT="${_trash:-$BASE/.dsh-suite/trash}"
 TRASH_INDEX="$TRASH_ROOT/index.log"        # 只追加的回收流水
 TRASH_KEEP_DAYS="${RDSH_TRASH_KEEP_DAYS:-7}" # 小于这个天数的回收项，purge 需要 --force
-PATCHES_ROOT="${_patches:-$BASE/dsh-patches}"   # 补丁仓（与 patch-manager.sh 同默认）
-PLUGIN_ROOT="${_plugin:-$BASE/dsh-plugins}"      # 插件权威副本（与 plugin-sync.sh 同默认）
+PATCHES_ROOT="${_patches:-$BASE/.dsh-suite/patches}"   # 补丁仓（与 patch-manager.sh 同默认）
+PLUGIN_ROOT="${_plugin:-$BASE/.dsh-suite/plugins}"      # 插件权威副本（与 plugin-sync.sh 同默认）
 SNAP_ROOT="$BACKUP_ROOT/snapshots"               # 增量快照根（每版本一目录，内含各时间戳快照）
 STATE_SNAP_ROOT="$BACKUP_ROOT/state-snapshots"   # 状态账本的本地快照（按用户裁定：state 只本地备份，不进仓）
 MYDSH_REPO="${_mydsh:-}"                         # 「我的 dsh」本地克隆路径（restore --from 可省）
@@ -1024,7 +1029,7 @@ resolve_or_adopt() {  # <目标串> <端口> → 条目（UNMANAGED 时走登记
   printf '%s\n' "$entry"
 }
 
-launch_bg_one() {  # <条目> <端口> <等待秒数> <noopen 0/1> → 0 就绪 / 1 未就绪
+launch_bg_one() {  # <条目> <端口> <等待秒数> <noopen 0/1> → 0 就绪 / 1 真的没成 / 3 已投递但未确认就绪
   local entry="$1" p="$2" tmo="$3" noopen="$4"
   local ver dir data unit unitname logf pid waited ts
   ver=$(entry_field "$entry" 1); dir=$(entry_field "$entry" 2)
@@ -1054,9 +1059,12 @@ launch_bg_one() {  # <条目> <端口> <等待秒数> <noopen 0/1> → 0 就绪 
   waited=0
   while ! port_listening "$p"; do
     if [ "$waited" -ge "$tmo" ]; then
-      warn "端口 $p 在 ${tmo}s 内没起来 —— unit 仍在后台继续（首次安装可能很慢）"
-      warn "  诊断：systemctl --user status $unit    日志：$logf"
-      return 1
+      warn "端口 $p 在 ${tmo}s 内**没等到就绪** —— unit 仍在后台继续（首次安装可能很慢）"
+      warn "  → 确认最终成功：rdsh status   /   ss -ltnp | grep :$p"
+      warn "  → 诊断：systemctl --user status $unit    日志：$logf"
+      # 2026-10-12：改专用码 3。原来和"真的没成"共用 1，调用方无法分辨
+      # 「没确认就绪」与「启动失败」——正是家规必背/F-52 要防的那种混淆。
+      return 3
     fi
     sleep 1; waited=$((waited+1))
   done
@@ -1565,19 +1573,28 @@ cmd_start() {
   fi
 
   # ---- 后台：逐个投递 + 等就绪 + 登记 ----
-  local failed=0
+  local failed=0 notready=0 rc=0
   i=0
   for e in "${ents[@]}"; do
-    launch_bg_one "$e" "${ports[$i]}" "$timeout" "$noopen" || failed=$((failed+1))
+    launch_bg_one "$e" "${ports[$i]}" "$timeout" "$noopen" || {
+      rc=$?
+      if [ "$rc" = "3" ]; then notready=$((notready+1)); else failed=$((failed+1)); fi
+    }
     i=$((i+1))
   done
   echo
-  if [ "$failed" = "0" ]; then
+  if [ "$failed" = "0" ] && [ "$notready" = "0" ]; then
     log "全部就绪（${#ents[@]} 个）。看实例：rdsh status；停止：rdsh stop（默认停端口最大的）"
-  else
-    warn "$failed 个实例未在 ${timeout}s 内就绪（其余不受影响）"
+    return 0
   fi
-  [ "$failed" = "0" ]
+  # 退出码 = 最高严重度：真的没成(1) > 只是没确认就绪(3) > 全部就绪(0)
+  [ "$failed" = "0" ] || warn "$failed 个实例**没起来**（投递失败 / 端口被占；其余不受影响）"
+  if [ "$notready" != "0" ]; then
+    warn "$notready 个实例**已投递、但未在 ${timeout}s 内确认就绪**（首次安装可能很慢，单元仍在后台跑）"
+    warn "  → 确认最终成功：rdsh status   （或 ss -ltnp 看端口）"
+  fi
+  if [ "$failed" != "0" ]; then return 1; fi
+  return 3
 }
 
 cmd_add() {  # add <路径> [--mode iso|link|body]

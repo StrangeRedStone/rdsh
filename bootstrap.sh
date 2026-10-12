@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# bootstrap.sh —— **蛋生鸡**：把 rdsh 装进一台新机器，并做初始化配置
+# bootstrap.sh —— **自举安装器（bootstrap）**：把 rdsh 装进一台新机器，并做初始化配置
 #
 # 为什么单独一个脚本：新机器上**还没有 rdsh**，所以它不能依赖 Rdsh.sh 已就位。
 # 它自己只做"取到本体"，之后一律把活交给刚装好的 Rdsh.sh（避免第二套实现）。
@@ -16,7 +16,7 @@
 #   7. 验收           rdsh base / doctor / bridge --spec（三条只读）→ 打印下一步
 #
 # 用法：
-#   bootstrap.sh                                  # 装到 ~/Mapp/dsh，配置写 ~/.config/rdsh/config
+#   bootstrap.sh                                  # 装到 $BASE/rdsh（经典为 $BASE/dsh），配置写 ~/.config/rdsh/config
 #   bootstrap.sh --base /opt/dsh                  # 换 BASE
 #   bootstrap.sh --from ~/Downloads/rdsh.tar.gz   # 离线装机（或 --from <已 clone 的目录>）
 #   bootstrap.sh --from .                          # 从当前目录（本身就是 clone）装
@@ -28,10 +28,13 @@
 # =============================================================================
 set -euo pipefail
 
-VERSION_MARK="bootstrap.sh（rdsh 蛋生鸡）"
+VERSION_MARK="bootstrap.sh（rdsh 自举安装）"
 
 BASE="${RDSH_BASE:-$HOME/Mapp}"
-DEST=""                    # rdsh 检出位置（默认 $BASE/dsh）
+BASE_EXPLICIT=0              # 是否由用户/环境显式指定过 BASE（0=未指定，可询问）
+[ -n "${RDSH_BASE:-}" ] && BASE_EXPLICIT=1
+DEST=""                    # rdsh 检出位置（默认 $BASE/rdsh；经典布局是 $BASE/dsh）
+DEST_EXPLICIT=0            # 是否由 --dir 显式指定（指定了就不跟着 BASE 重算）
 REPO="${RDSH_SELF_REPO:-git@github.com:StrangeRedStone/rdsh.git}"
 REPO_HTTPS="https://github.com/StrangeRedStone/rdsh.git"
 FROM=""
@@ -42,6 +45,7 @@ DRY=0
 NO_LINK=0
 NO_DEPS=0
 FORCE=0
+ASSUME_YES=${ASSUME_YES:-0}
 LOG=""
 
 die()  { printf '\033[1;31m[bootstrap!]\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
@@ -53,10 +57,10 @@ expand() { case "$1" in "~"|"~/"*) printf '%s' "${HOME}${1#\~}" ;; *) printf '%s
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --base) shift; BASE="${1:?--base 需要路径}" ;;
-    --base=*) BASE="${1#--base=}" ;;
-    --dir) shift; DEST="${1:?--dir 需要路径}" ;;
-    --dir=*) DEST="${1#--dir=}" ;;
+    --base) shift; BASE="${1:?--base 需要路径}"; BASE_EXPLICIT=1 ;;
+    --base=*) BASE="${1#--base=}"; BASE_EXPLICIT=1 ;;
+    --dir) shift; DEST="${1:?--dir 需要路径}"; DEST_EXPLICIT=1 ;;
+    --dir=*) DEST="${1#--dir=}"; DEST_EXPLICIT=1 ;;
     --repo) shift; REPO="${1:?--repo 需要 URL}" ;;
     --repo=*) REPO="${1#--repo=}" ;;
     --from) shift; FROM="${1:?--from 需要目录或 tarball}" ;;
@@ -71,6 +75,7 @@ while [ $# -gt 0 ]; do
     --no-link) NO_LINK=1 ;;
     --force) FORCE=1 ;;
     --no-deps-check) NO_DEPS=1 ;;
+    --yes|-y) ASSUME_YES=1 ;;
     -h|--help) sed -n '2,/^# =\{20,\}$/p' "$0"; exit 0 ;;
     *) die "未知参数：$1（--help 看用法）" ;;
   esac
@@ -78,9 +83,20 @@ while [ $# -gt 0 ]; do
 done
 
 BASE="$(expand "$BASE")"; CONFIG="$(expand "$CONFIG")"; BIN_DIR="$(expand "$BIN_DIR")"
-[ -n "$DEST" ] || DEST="$BASE/dsh"
+[ -n "$DEST" ] || DEST="$BASE/rdsh"
 DEST="$(expand "$DEST")"
 [ -n "$FROM" ] && FROM="$(expand "$FROM")"
+
+# 未指定安装位置、且是交互终端 → **问一句**（不静默按默认走）。
+# 用户规格（2026-08-??）："未指定时不静默——问一句；用户给了就用（不存在就建）"。
+# 非终端输入（流水线/脚本）与 --yes 都保持原来的默认行为，不改变既有自动化。
+if [ "$BASE_EXPLICIT" = 0 ] && [ "$ASSUME_YES" = 0 ] && [ -t 0 ]; then
+  read -r -p "安装位置 BASE [默认 $BASE]: " _ans || true
+  if [ -n "${_ans:-}" ]; then BASE="$(expand "$_ans")"; fi
+  # BASE 变了，检出位置要跟着重算（除非 --dir 显式给了）
+  [ "$DEST_EXPLICIT" = 1 ] || DEST="$BASE/rdsh"
+  say "按你的输入：BASE=$BASE"
+fi
 
 if [ "$DRY" = "1" ]; then
   LOG="$BASE/.dsh-suite/logs/bootstrap-<时间戳>.log（dry-run 不落盘）"

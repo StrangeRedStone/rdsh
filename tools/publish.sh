@@ -13,13 +13,13 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 REPO="$(dirname "$SELF_DIR")"                 # tools/ 的上一层 = 仓库根
-FROM="${RDSH_PUBLISH_FROM:-$HOME/Mapp/dsh}"    # 本机工作目录
+FROM="${RDSH_PUBLISH_FROM:-}"                   # 本机工作目录（留空 = 从 rdsh 的 BASE 推导）
 MODE=""
 DRY=0
 nfiles() { printf '%s\n' $FILES | wc -l; }   # 白名单文件数（不要用 printf '%s' $FILES | wc -w —— 多参不分离）
 # 守卫位置：仓库里优先，其次本机权威副本（首次发布时仓库里还没有它：要先有脚本才能发布脚本）
-SCAN="$SELF_DIR/scan-secrets.sh"
-[ -f "$SCAN" ] || SCAN="$FROM/scan-secrets.sh"
+# 2026-10-12：SCAN 的解析**挪到 FROM 定下来之后**（原来在这里就算，于是 `--from` 只改了源、
+# 守卫路径仍按默认源算 → 隐私守卫被**静默跳过**（"静默失效"那一类）。见下方 FROM 推导处。
 
 # 隐私守卫：搬运/提交**之前**扫一遍，有 error 就不许继续（不是"事后提醒"）
 scan_guard() {  # <模式: files|repo>
@@ -48,7 +48,7 @@ usage() {
   echo "  publish.sh --stage --dry-run   只打印将要做什么"
   echo
   echo "选项:"
-  echo "  --from <目录>   本机脚本所在（默认 $HOME/Mapp/dsh，或环境变量 RDSH_PUBLISH_FROM）"
+  echo "  --from <目录>   本机脚本所在（默认从 rdsh 的 BASE 推导，或环境变量 RDSH_PUBLISH_FROM）"
   echo "  --repo <目录>   发布仓库根（默认为本脚本所在的仓库）"
   echo "  -h, --help      显示本帮助"
   echo
@@ -74,6 +74,15 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$MODE" ] || { usage; exit 1; }
+# 默认源：从 rdsh 的**唯一旋钮**推导（env RDSH_BASE → 配置文件 BASE → 历史默认）；检出根 = $BASE/rdsh（经典 $BASE/dsh 回退）。
+if [ -z "$FROM" ]; then
+  _base="${RDSH_BASE:-$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "${RDSH_CONFIG:-$HOME/.config/rdsh/config}" 2>/dev/null | tail -1)}"
+  _base="${_base:-$HOME/Mapp}"
+  for _cand in "$_base/rdsh" "$_base/dsh"; do [ -f "$_cand/Rdsh.sh" ] && { FROM="$_cand"; break; }; done
+  FROM="${FROM:-$_base/rdsh}"
+fi
+SCAN="$SELF_DIR/scan-secrets.sh"
+[ -f "$SCAN" ] || SCAN="$FROM/scan-secrets.sh"
 [ -d "$FROM" ] || die "源目录不存在：$FROM（用 --from 指定）"
 [ -d "$REPO/.git" ] || die "目标不是 git 仓库：$REPO（用 --repo 指定）"
 

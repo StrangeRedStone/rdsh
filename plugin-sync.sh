@@ -6,7 +6,7 @@
 #   在新旧 home 各存一份，改一处另一处不会跟着变（2026-09-17 真实升级中踩到：
 #   compat_check 的修复只落在 0.1.6 那份）。本脚本给插件引入**唯一权威副本**：
 #
-#     权威副本（canonical）: $BASE/dsh-plugins/<插件名>/     ← 代码只此一份
+#     权威副本（canonical）: $BASE/.dsh-suite/plugins/<插件名>/     ← 代码只此一份
 #     各版本 home 里的副本  : $DSH_HOME/plugins/<插件名>/     ← 可被 --sync 覆盖
 #
 # 口径（重要）：
@@ -66,9 +66,9 @@ if [ -z "$MANAGE_ROOT" ]; then
     if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
   fi
 fi
-DATA_ROOT="${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}";       [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh"
-BACKUP_ROOT="${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
-CANON="${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}";       [ -n "$CANON" ]       || CANON="$BASE/dsh-plugins"
+DATA_ROOT="${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}";       [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh-suite/data"
+BACKUP_ROOT="${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
+CANON="${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}";       [ -n "$CANON" ]       || CANON="$BASE/.dsh-suite/plugins"
 
 log()  { printf '\033[1;34m[plugins]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[plugins!]\033[0m %s\n' "$*"; }

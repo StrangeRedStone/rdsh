@@ -9,7 +9,7 @@
 #   L1 上游数据  sessions/ storages/ settings.yaml .credentials.yaml
 #                → 原样搬，交给新版自己迁移（会话格式有 v0→v1→v2(→v3) 链）
 #   L2 作者资产  skills/ lessons.md AGENTS.md .agent-presets/ facts.md backlog.md
-#                → **不搬**：它们在稳定根 $BASE/.dsh-shared/，各版本 home 内只建软链
+#                → **不搬**：它们在稳定根 $BASE/.dsh-suite/shared/，各版本 home 内只建软链
 #   L3 插件      plugins/ + profiles/web/cordis.patch.yml
 #                → 复制 + 重建 symlink；API 有变时靠 compat_check 出断点报告
 #
@@ -24,7 +24,7 @@
 #
 # 环境覆盖（默认与 Rdsh.sh 一致；便于隔离测试）:
 #   DSH_DATA_ROOT   $BASE/.dsh          DSH_MANAGE_ROOT $BASE/dsh
-#   DSH_BACKUP_ROOT $BASE/.dsh-backup   DSH_SHARED_HOME $BASE/.dsh-shared
+#   DSH_BACKUP_ROOT $BASE/.dsh-suite/backup   DSH_SHARED_HOME $BASE/.dsh-suite/shared
 #   （$BASE 默认 ~/Mapp；以上均可用环境变量或配置文件覆盖）
 #
 # 回退基线: 每次运行都把「源/目标/备份目录/会话策略/探针结论」记进**状态账本**
@@ -54,10 +54,10 @@ if [ -z "$MANAGE_ROOT" ]; then
     if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
   fi
 fi
-DATA_ROOT="$(expand_tilde "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")";         [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh"
-BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")";   [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-backup"
-SHARED_ROOT="$(expand_tilde "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")";   [ -n "$SHARED_ROOT" ] || SHARED_ROOT="$BASE/.dsh-shared"
-PLUGIN_ROOT="$(expand_tilde "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")";   [ -n "$PLUGIN_ROOT" ] || PLUGIN_ROOT="$BASE/dsh-plugins"
+DATA_ROOT="$(expand_tilde "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")";         [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh-suite/data"
+BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")";   [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
+SHARED_ROOT="$(expand_tilde "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")";   [ -n "$SHARED_ROOT" ] || SHARED_ROOT="$BASE/.dsh-suite/shared"
+PLUGIN_ROOT="$(expand_tilde "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")";   [ -n "$PLUGIN_ROOT" ] || PLUGIN_ROOT="$BASE/.dsh-suite/plugins"
 BASELINE="$BACKUP_ROOT/回退基线.md"
 
 DRY=0

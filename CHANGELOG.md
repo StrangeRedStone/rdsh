@@ -2,6 +2,38 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.0 — 2026-10-12
+
+> 主题：**布局收敛成一个旋钮**（搬机不再靠手工配十个根）+ 三处"静默失败"的修复 + 文档对齐。
+> 用户 2026-10-11/12 定：**往后按 1.x 发布**；本版含**破坏性变更**（默认根位置），老布局靠显式配置与回退兼容。
+
+### 破坏性变更（务必看）
+
+- **默认根全部收敛到 `$BASE/.dsh-suite/*`**，检出根默认 **`$BASE/rdsh`**（`MANAGE_ROOT`；经典 `$BASE/dsh` 自动回退）：
+  `DATA_ROOT=$BASE/.dsh-suite/data`、`BACKUP_ROOT=…/backup`、`SHARED_ROOT=…/shared`、`LOG_DIR=…/logs`、
+  `PLUGIN_ROOT=…/plugins`、`PATCHES=…/patches`。
+  **同一份默认值此前被复制在 6 个脚本里**（`Rdsh.sh` + `doctor.sh`/`plugin-sync.sh`/`migrate.sh`/`patch-manager.sh`/`rdsh-restart.sh`），本次一并统一。
+  ⇒ 好处：配置文件可以只留一行 `BASE=`，`rdsh base <新路径>` **才真正能搬动整棵树**（此前显式根会盖住 BASE）。
+  ⇒ 兼容：老安装显式写了根键的**不受影响**；只写 `BASE` 的会把数据根指到新默认位置（首次升级请核 `rdsh base` 与 `rdsh doctor`）。
+
+### 新增
+
+- **`rdsh run/start` 专用退出码 3**：**0** 全部确认就绪 / **1** 有实例没起来（投递失败、端口被占）/ **3** 已投递但未在 `--timeout` 内**确认就绪**（单元仍在后台跑 → `rdsh status` 确认）。此前"没确认"与"真的没成"共用 1，调用方无法分辨；命令契约仍是"确认就绪才算成功"，**没有**降级成 0。
+- **`bootstrap.sh`：未指定位置就问一句**（仅交互终端；`--yes/-y` 跳过；非终端保持原行为），默认检出位置改为 `$BASE/rdsh`。
+- **`docs/能力与命令总表.md`**：按"能力 → 脚本 → 命令 → **定义** → **证据**"编排的速查表，并给每脚本一节（功能/命令/边界）。
+- README 增《退出码》一节（按命令族）与新人引导句（"只想跑一个 dsh 就用 `pnpm dlx`"）。
+
+### 修复（都是"静默失败"）
+
+- **`publish.sh` 的隐私守卫被静默跳过**：`SCAN` 在参数解析**之前**就用默认源算路径，于是 `--from` 换了源、守卫路径没换 → 找不到守卫就"未扫描"。已把 `SCAN` 解析挪到源定下来之后；现在**发布前必扫**。
+- **`publish.sh` 默认源写死 `~/Mapp/dsh`**：改为从 rdsh 的 `BASE` 推导（env → 配置文件 → 历史默认，`rdsh`/`dsh` 双布局回退）。
+- **`rdsh-restart.sh` 的飞轮兜底静默失败**：投递 systemd 单元后不再"就当成功"，而是**判定结果**——失败就在重启日志里明说（附 journal 末行）、提示"在 Web 里手动继续"并**保留台账**。
+- **`plugin-prefs`/`reboot` 等旧文案里的死路径**（`~/Mapp/.dsh-logs` 等）与 `应急启动.md` 整篇重写：路径一律从 `BASE` 推导。
+
+### 变更（配套）
+
+- `plugins.d/session-archive.sh`：归档落点改 `$BASE/sessionsD/sessions`（与 `coldD` **并列**，同属冷数据）；`inject` 新建工作区条目改为**照真实注册表形状**写（`path/title/sessionIds/createdAt(ISO)/updatedAt(ISO)`，此前是 `createdAt:0` 且缺字段）。
+
 ## 0.9.3 — 2026-10-08
 
 > 主题：**外部能力（插件接入点）** + 三处"静默失败"的修复。
