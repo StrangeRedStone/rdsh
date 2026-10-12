@@ -73,7 +73,15 @@
 #   rdsh trash ls | restore <条目名|--last> [--force]
 #                                         # 回收站（永不 rm 的落点）：条目带清单与还原命令
 #   rdsh logs [-f] [版本|序号] [-o]       # 查看/打开启动日志（--clean 清理旧日志）
-#   rdsh base [路径] [--unset]            # 查看/设置基目录（只改 rdsh 的指向，不搬动任何数据）
+#   rdsh base [路径] [--set|--dry-run|--yes|--unset]   # 基目录（唯一旋钮）：**默认自动跟上**
+#                                         #   rdsh base <新根> = 出计划 → 确认 → 搬迁检出/数据/资产/
+#                                         #     账本 + 全盘重绑（软链/`.map`/注册表/回声/入口）→ 自检
+#                                         #     → 留还原清单与还原脚本；幂等，可中断重跑
+#                                         #   --set 只改配置一行（多根之间切换用，不搬东西）
+#                                         #   --dry-run 只出计划；--yes 不问（非交互本来就不问）
+#                                         #   --residue <旧根> 零残留扫描（rc=1=还有东西指着旧根）
+#                                         #   --repoint <旧> <新> 纯重绑（还原脚本用它）
+#                                         #   --unset 删掉配置里的 BASE（回默认 $HOME/Mapp）
 #   rdsh patch list|status|apply|revert|export  # 检出补丁管理（转发 patch-manager.sh）
 #                                         #   apply/revert 会改检出：默认要 --yes，支持 --dry-run
 #   rdsh fetch --list [--refresh]         # 列远端可用版本（GitHub API 列举 + 10 分钟缓存；失败回退 git ls-remote）
@@ -2048,14 +2056,858 @@ cmd_backup() {
   [ "$failed" = "0" ] || { warn "$failed 项未完成"; return 1; }
 }
 
-# ---------------- base：查看/设置基目录（P1：只改指向，不搬数据） ----------------
+# ---------------- base：查看/设置基目录 ----------------
+# 语义（2026-10-12：改根成为一等操作）
+#   人读报告 / --json / --print-paths / --unset   同以往（机器出口语义不变）
+#   rdsh base <新根>            **默认自动跟上**：出计划 → 确认 → 搬迁 → 重绑 → 修入口 → 自检 → 留还原清单
+#   rdsh base <新根> --set      老行为：只改配置里 BASE 一行（多根之间切换用；不搬任何东西）
+#   rdsh base <新根> --dry-run  只出计划
+#   rdsh base --residue <旧根>  零残留扫描：全盘数"还有多少东西指着旧根"（rc=1 表示有残留）
+#   rdsh base --repoint <旧> <新>  纯重绑：把全盘引用由旧前缀改指新前缀（不搬文件；还原脚本用它）
+#
+# 为什么这样做（用户 2026-10-12：「能不能在改根时自动跟上改动？毕竟这也是常见操作」）：
+#   此前 rdsh base <新路径> 只改配置一行，盘上的数据目录 / 6 条资产软链 / 账本 / 入口链接
+#   全指着旧根 —— "改根"于是变成一场要手工收尾的搬家，且没人告诉你还剩多少没跟上。
+#   本命令把这场搬家做成可计划、可确认、可重入、可自检、可回滚的一条链。
+
+# 由 BASE 推导的**标准布局**（与脚本开头默认值一致）：搬迁目标、建骨架、扫描范围都用它
+BASE_ROOT_KEYS="STATE_ROOT BACKUP_ROOT LOG_DIR RUN_DIR TRASH_ROOT PATCHES_ROOT PLUGIN_ROOT DEBUG_ROOT SHARED_ROOT DATA_ROOT MANAGE_ROOT"
+base_std_path() {  # <BASE> <键> → 标准布局路径
+  case "$2" in
+    MANAGE_ROOT)  printf '%s/rdsh' "$1" ;;
+    DATA_ROOT)    printf '%s/.dsh-suite/data' "$1" ;;
+    SHARED_ROOT)  printf '%s/.dsh-suite/shared' "$1" ;;
+    BACKUP_ROOT)  printf '%s/.dsh-suite/backup' "$1" ;;
+    LOG_DIR)      printf '%s/.dsh-suite/logs' "$1" ;;
+    RUN_DIR)      printf '%s/.dsh-suite/run' "$1" ;;
+    STATE_ROOT)   printf '%s/.dsh-suite/state' "$1" ;;
+    TRASH_ROOT)   printf '%s/.dsh-suite/trash' "$1" ;;
+    PLUGIN_ROOT)  printf '%s/.dsh-suite/plugins' "$1" ;;
+    PATCHES_ROOT) printf '%s/.dsh-suite/patches' "$1" ;;
+    DEBUG_ROOT)   printf '%s/.dsh-suite/debug' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+base_root_label() {  # <键> → 人读名
+  case "$1" in
+    MANAGE_ROOT)  printf '检出根' ;;
+    DATA_ROOT)    printf '数据根' ;;
+    SHARED_ROOT)  printf '作者资产根' ;;
+    BACKUP_ROOT)  printf '备份根' ;;
+    LOG_DIR)      printf '启动日志' ;;
+    RUN_DIR)      printf '实例注册表' ;;
+    STATE_ROOT)   printf '状态账本' ;;
+    TRASH_ROOT)   printf '回收站' ;;
+    PLUGIN_ROOT)  printf '插件权威副本' ;;
+    PATCHES_ROOT) printf '补丁仓' ;;
+    DEBUG_ROOT)   printf '调试沙箱根' ;;
+    *)            printf '%s' "$1" ;;
+  esac
+}
+base_cur_path() {  # <键> → 本进程当前解析值
+  case "$1" in
+    MANAGE_ROOT)  printf '%s' "$MANAGE_ROOT" ;;
+    DATA_ROOT)    printf '%s' "$DATA_ROOT" ;;
+    SHARED_ROOT)  printf '%s' "$SHARED_ROOT" ;;
+    BACKUP_ROOT)  printf '%s' "$BACKUP_ROOT" ;;
+    LOG_DIR)      printf '%s' "$LOG_DIR" ;;
+    RUN_DIR)      printf '%s' "$RUN_DIR" ;;
+    STATE_ROOT)   printf '%s' "$STATE_ROOT" ;;
+    TRASH_ROOT)   printf '%s' "$TRASH_ROOT" ;;
+    PLUGIN_ROOT)  printf '%s' "$PLUGIN_ROOT" ;;
+    PATCHES_ROOT) printf '%s' "$PATCHES_ROOT" ;;
+    DEBUG_ROOT)   printf '%s' "$DEBUG_ROOT" ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---- 引用判定与改指：一律"按路径前缀批量改指"（一条通用规则盖住所有类别） ----
+base_prefix_hit() {  # <值> <旧根…> → 0=这个值就是/以某旧根开头（路径式引用）
+  local v="$1"; shift
+  local o
+  for o in "$@"; do
+    [ -n "$o" ] || continue
+    [ "$o" = "/" ] && continue
+    case "$v" in "$o"|"$o"/*) return 0 ;; esac
+  done
+  return 1
+}
+base_any_hit() {  # <文本> <旧根…> → 0=文本任何位置含某旧根（后面跟 / 或到行尾）
+  local s="$1"; shift
+  local o
+  for o in "$@"; do
+    [ -n "$o" ] || continue
+    [ "$o" = "/" ] && continue
+    case "$s" in *"$o"/*|*"$o") return 0 ;; esac
+  done
+  return 1
+}
+base_reprefix() {  # <值> <旧1> <新1> … → 只看开头；命中第一对就换完退出
+  local v="$1"; shift
+  local o n
+  while [ $# -ge 2 ]; do
+    o="$1"; n="$2"; shift 2
+    [ -n "$o" ] || continue
+    [ "$o" = "/" ] && continue
+    case "$v" in
+      "$o"|"$o"/*) v="$n${v#"$o"}"; break ;;
+    esac
+  done
+  printf '%s' "$v"
+}
+base_replace_all() {  # <文本> <旧1> <新1> … → 任意位置替换（字面替换，无正则）
+  local s="$1"; shift
+  local o n
+  while [ $# -ge 2 ]; do
+    o="$1"; n="$2"; shift 2
+    [ -n "$o" ] || continue
+    [ "$o" = "/" ] && continue
+    s="${s//"$o"/$n}"
+  done
+  printf '%s' "$s"
+}
+base_lines() {  # 每个参数一行（给 awk 的 split 用）
+  local a
+  for a in "$@"; do printf '%s\n' "$a"; done
+  return 0
+}
+base_pair_list() {  # <old|new|all> <旧1> <新1> … → 每行一项
+  local pick="$1"; shift
+  local i=1 a
+  for a in "$@"; do
+    case "$pick" in
+      all) printf '%s\n' "$a" ;;
+      old) [ $((i % 2)) = 1 ] && printf '%s\n' "$a" ;;
+      new) [ $((i % 2)) = 0 ] && printf '%s\n' "$a" ;;
+    esac
+    i=$((i+1))
+  done
+  return 0
+}
+
+# ---- 扫描范围（明说，不做全盘扫）----
+BASE_SCOPE_OVERRIDE=""     # 搬迁过程中临时改指到"新根"（本进程的 $BASE 还是旧值）
+BASE_SCOPE_EXTRA=()        # 由 --scope 追加
+BASE_SCAN_MAX="${RDSH_SCAN_MAX_LINES:-30}"   # 扫描输出上限（防几千行刷屏；调大 RDSH_SCAN_MAX_LINES 看全）
+BASE_SCAN_PRINTED=0
+BASE_SCAN_OMITTED=0
+base_scan_scope() {  # 打印要扫的根，每行一个
+  printf '%s\n' "${BASE_SCOPE_OVERRIDE:-$BASE}"
+  printf '%s\n' "${RDSH_ENTRY_BIN_DIR:-$HOME/.local/bin}"
+  printf '%s\n' "$HOME/.local/share/applications"
+  local s
+  for s in ${BASE_SCOPE_EXTRA[@]+"${BASE_SCOPE_EXTRA[@]}"}; do
+    [ -n "$s" ] && printf '%s\n' "$s"
+  done
+  return 0
+}
+base_file_kind() {  # <路径> → link|kv|map|instances|text|other
+  local f="$1"
+  if [ -L "$f" ]; then printf 'link'; return 0; fi
+  case "$(basename "$f")" in
+    versions.kv)  printf 'kv' ;;
+    .map)         printf 'map' ;;
+    .installed)   printf 'text' ;;
+    应急启动.md)  printf 'text' ;;
+    *.desktop)    printf 'text' ;;
+    *) case "$f" in */instances/*.kv) printf 'instances' ;; *) printf 'other' ;; esac ;;
+  esac
+}
+base_find_targets() {  # <根>：一趟 find 出所有"可能带引用"的对象
+  # 桌面图标只看本工具那两枚（dsh*.desktop / *rdsh*.desktop）：别人的 .desktop 与"指向旧根的引用"无关
+  find "$1" \( -type l -o -name versions.kv -o -name .map -o -name .installed \
+              -o -name 应急启动.md -o -name 'dsh*.desktop' -o -name '*rdsh*.desktop' \
+              -o -path '*/instances/*.kv' \) -print 2>/dev/null || true
+}
+
+# ---- 扫描与重写 ----
+base_scan_delim() {  # <文件> <分隔符> <字段号逗号表> <旧根…> → 命中行：文件<TAB>字段<TAB>值
+  local f="$1" sep="$2" colspec="$3"; shift 3
+  local olds; olds="$(base_lines "$@")"
+  awk -v FS="$sep" -v cols="$colspec" -v olds="$olds" '
+    BEGIN { m=split(cols,C,","); n=split(olds,O,"\n") }
+    /^#/ { next }
+    NF==0 { next }
+    { for (j=1;j<=m;j++) { c=C[j]+0; if (c>0 && c<=NF) { v=$c
+        for (k=1;k<=n;k++) { o=O[k]; if (o==""||o=="/") continue
+          if (v==o || index(v, o "/")==1) { printf "%s\t%s\t%s\n", FILENAME, c, v; break } } } } }
+  ' "$f"
+}
+base_scan_eqfile() {  # <文件> <旧根…> → 扫描 key=value（dir/data/log）
+  local f="$1"; shift
+  local olds; olds="$(base_lines "$@")"
+  # 注意 -F= ：否则 $1 是整行，报告里会把"键=值"重复打一遍（冒烟抓出来的）
+  awk -F= -v olds="$olds" '
+    BEGIN { n=split(olds,O,"\n") }
+    /^(dir|data|log)=/ { v=substr($0, index($0,"=")+1)
+      for (k=1;k<=n;k++) { o=O[k]; if (o==""||o=="/") continue
+        if (v==o || index(v, o "/")==1) { printf "%s\t%s\t%s\n", FILENAME, $1, v; break } } }
+  ' "$f"
+}
+base_scan_text() {  # <文件> <旧根…> → 命中行：文件:行号<TAB>文本
+  local f="$1"; shift
+  local ln=0 line
+  while IFS= read -r line || [ -n "$line" ]; do
+    ln=$((ln+1))
+    if base_any_hit "$line" "$@"; then
+      printf '%s:%s\t%s\n' "$f" "$ln" "$(printf '%s' "$line" | cut -c1-200)"
+    fi
+  done < "$f"
+  return 0
+}
+
+base_rewrite_file() {  # <路径> <kind> <旧1> <新1> … → 0=改了 / 1=无需改或失败
+  local f="$1" kind="$2"; shift 2
+  [ -e "$f" ] || [ -L "$f" ] || return 1
+  if [ "$kind" = "link" ]; then
+    local t nt
+    t="$(readlink "$f" 2>/dev/null || true)"
+    nt="$(base_reprefix "$t" "$@")"
+    [ "$nt" != "$t" ] || return 1
+    if ln -sfn "$nt" "$f"; then log "  重绑软链：$f → $nt"; return 0; fi
+    warn "  软链改指失败：$f"
+    return 1
+  fi
+  local OLDS NEWS tmp
+  OLDS="$(base_pair_list old "$@")"
+  NEWS="$(base_pair_list new "$@")"
+  tmp="$f.rdsh-rebind.$$"
+  case "$kind" in
+    kv)
+      local c1 c2; c1="$(state_col_of dir)"; c2="$(state_col_of data)"
+      awk -F'|' -v OFS='|' -v c1="$c1" -v c2="$c2" -v olds="$OLDS" -v news="$NEWS" '
+        BEGIN { n=split(olds,O,"\n"); split(news,N,"\n") }
+        /^#/ { print; next }
+        NF==0 { next }
+        { for (j=1;j<=2;j++) { c=(j==1?c1:c2)+0
+            if (c>0 && c<=NF) { v=$c
+              for (k=1;k<=n;k++) { o=O[k]; if (o==""||o=="/") continue
+                if (v==o || index(v, o "/")==1) { $c=N[k] substr(v, length(o)+1); break } } } } print }
+      ' "$f" > "$tmp" ;;
+    map)
+      awk -F'|' -v OFS='|' -v c1="2" -v c2="3" -v olds="$OLDS" -v news="$NEWS" '
+        BEGIN { n=split(olds,O,"\n"); split(news,N,"\n") }
+        /^#/ { print; next }
+        NF==0 { next }
+        { for (j=1;j<=2;j++) { c=(j==1?c1:c2)+0
+            if (c>0 && c<=NF) { v=$c
+              for (k=1;k<=n;k++) { o=O[k]; if (o==""||o=="/") continue
+                if (v==o || index(v, o "/")==1) { $c=N[k] substr(v, length(o)+1); break } } } } print }
+      ' "$f" > "$tmp" ;;
+    instances)
+      # 注意 -F= ：否则 $1 是整行，"print $1 \"=\" v" 会把一行写成"键=值=新值"（冒烟抓出来的）
+      awk -F= -v olds="$OLDS" -v news="$NEWS" '
+        BEGIN { n=split(olds,O,"\n"); split(news,N,"\n") }
+        /^(dir|data|log)=/ { v=substr($0, index($0,"=")+1)
+          for (k=1;k<=n;k++) { o=O[k]; if (o==""||o=="/") continue
+            if (v==o || index(v, o "/")==1) { v=N[k] substr(v, length(o)+1); break } }
+          print $1 "=" v; next }
+        { print }
+      ' "$f" > "$tmp" ;;
+    text)
+      while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s\n' "$(base_replace_all "$line" "$@")"
+      done < "$f" > "$tmp" ;;
+    *) return 1 ;;
+  esac
+  # 防呆：非空源文件重写成空 → 绝不落盘（宁可留下 .rdsh-rebind 现场，也不许写坏）
+  if [ -s "$f" ] && [ ! -s "$tmp" ]; then
+    warn "  重写产出为空，拒绝落盘（现场保留）：$tmp"
+    return 1
+  fi
+  if cmp -s "$tmp" "$f" 2>/dev/null; then
+    touch -r "$f" "$tmp" 2>/dev/null || true    # 内容没变：保住 mtime（.installed 的 mtime 是安装时间依据）
+    mv -f "$tmp" "$f" || true
+    return 1
+  fi
+  chmod --reference="$f" "$tmp" 2>/dev/null || true
+  if mv -f "$tmp" "$f"; then log "  重绑：$f"; return 0; fi
+  warn "  重绑写入失败：$f"
+  return 1
+}
+
+base_rebind_all() {  # <旧1> <新1> … ：把全盘引用按前缀改指（软链/账本/.map/注册表/回声/入口）
+  [ $# -ge 2 ] || return 0
+  local root kind f n=0
+  while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      kind="$(base_file_kind "$f")"
+      case "$kind" in other) continue ;; esac
+      if base_rewrite_file "$f" "$kind" "$@"; then n=$((n+1)); fi
+    done < <(base_find_targets "$root")
+  done < <(base_scan_scope)
+  log "  重绑：$n 个对象已改指新根"
+  return 0
+}
+
+base_residue_scan() {  # <旧根…> ：数"还有多少东西指着旧根"；rc=0 干净 / 1 活跃区有残留
+  if [ $# -lt 1 ]; then warn '用法: rdsh base --residue <旧根>'; return 2; fi
+  local -a olds=("$@")
+  local n=0 arch=0 root f kind hits line t isarch
+  BASE_SCAN_PRINTED=0; BASE_SCAN_OMITTED=0
+  echo "零残留扫描（范围：当前根全树的软链/versions.kv/.map/实例注册表/.installed/应急启动.md/dsh*.desktop + 入口目录 + 配置文件）"
+  printf '  旧根：%s\n' "${olds[*]}"
+  printf '  扫的是：%s\n' "$(base_scan_scope | tr '\n' ' ')"
+  echo '  计数分两类：**活跃区**（BASE 全树，除备份/回收站）/ **归档区**（backup、trash 里的历史副本）'
+  echo '  journal.log、回退基线-历史.md、历次 base-move-*.md 是"只追加的历史"，按设计不算活引用'
+  while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      isarch=0
+      case "$f" in */.dsh-suite/backup/*|*/.dsh-suite/trash/*|*/.dsh-backup/*) isarch=1 ;; esac
+      kind="$(base_file_kind "$f")"
+      hits=""
+      case "$kind" in
+        link)
+          t="$(readlink "$f" 2>/dev/null || true)"
+          base_prefix_hit "$t" "${olds[@]}" && hits="[链] $f → $t" ;;
+        kv)
+          hits="$(base_scan_delim "$f" '|' "$(state_col_of dir),$(state_col_of data)" "${olds[@]}" \
+                  | tr '\t' ' ' | sed "s|^|\[账本\] |")" ;;
+        map)
+          hits="$(base_scan_delim "$f" '|' '2,3' "${olds[@]}" | tr '\t' ' ' | sed "s|^|\[.map\] |")" ;;
+        instances)
+          hits="$(base_scan_eqfile "$f" "${olds[@]}" | tr '\t' ' ' | sed "s|^|\[注册表\] |")" ;;
+        text)
+          hits="$(base_scan_text "$f" "${olds[@]}" | tr '\t' ' ' | sed "s|^|\[文本\] |")" ;;
+      esac
+      [ -n "$hits" ] || continue
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if [ "$isarch" = "1" ]; then arch=$((arch+1)); zone='[归档]'; else n=$((n+1)); zone='[活跃]'; fi
+        if [ "$BASE_SCAN_PRINTED" -lt "$BASE_SCAN_MAX" ]; then
+          printf '  %s %s\n' "$zone" "$line"; BASE_SCAN_PRINTED=$((BASE_SCAN_PRINTED+1))
+        else
+          BASE_SCAN_OMITTED=$((BASE_SCAN_OMITTED+1))
+        fi
+      done <<< "$hits"
+    done < <(base_find_targets "$root")
+  done < <(base_scan_scope)
+  if [ -f "$RDSH_CONFIG" ]; then
+    local cline
+    while IFS= read -r cline || [ -n "$cline" ]; do
+      if base_any_hit "$cline" "${olds[@]}"; then
+        n=$((n+1))
+        if [ "$BASE_SCAN_PRINTED" -lt "$BASE_SCAN_MAX" ]; then
+          printf '  [活跃] [配置] %s：%s\n' "$RDSH_CONFIG" "$cline"; BASE_SCAN_PRINTED=$((BASE_SCAN_PRINTED+1))
+        else
+          BASE_SCAN_OMITTED=$((BASE_SCAN_OMITTED+1))
+        fi
+      fi
+    done < "$RDSH_CONFIG"
+  fi
+  local cnt
+  for root in "${olds[@]}"; do
+    if [ ! -e "$root" ]; then printf '  旧根不存在：%s\n' "$root"; continue; fi
+    cnt="$(find "$root" -mindepth 1 -maxdepth 1 2>/dev/null | grep -c . || true)"
+    if [ "${cnt:-0}" = "0" ]; then
+      printf '  旧根目录还在但已空：%s（可自行 rmdir）\n' "$root"
+    else
+      printf '  旧根下仍有 %s 个顶层条目（不是"引用"，本命令不据此判失败）：%s\n' "$cnt" "$root"
+      find "$root" -mindepth 1 -maxdepth 1 2>/dev/null | head -5 | sed 's/^/      /'
+    fi
+  done
+  printf '\n  结果：活跃区引用 %s 处；归档区（备份/回收站的历史副本）引用 %s 处\n' "$n" "$arch"
+  if [ "$BASE_SCAN_OMITTED" != "0" ]; then
+    printf '  （每类最多列 %s 行，另有 %s 条已省略；要看全就调大 RDSH_SCAN_MAX_LINES）\n' "$BASE_SCAN_MAX" "$BASE_SCAN_OMITTED"
+  fi
+  if [ "$n" = "0" ]; then log "零残留：活跃区没有东西指着旧根（归档区 $arch 处按历史副本对待）"; return 0; fi
+  warn "还有 $n 处（活跃区）引用指着旧根 → 修：rdsh base --repoint <旧根> <新根>"
+  return 1
+}
+
+# ---- 搬迁 ----
+BASE_MOVE_WHAT=""
+base_move_tree() {  # <标签> <旧> <新> → 0=已处理（含"无需处理"）/ 1=有冲突或失败
+  local lab="$1" o="$2" n="$3" e bn moved=0 skipped=0
+  BASE_MOVE_WHAT=""
+  if [ ! -e "$o" ] && [ ! -L "$o" ]; then
+    if [ -e "$n" ]; then BASE_MOVE_WHAT="已在位（旧路径本来就没有）"
+    else BASE_MOVE_WHAT="旧路径不存在，跳过"; fi
+    log "  $lab：$BASE_MOVE_WHAT"
+    return 0
+  fi
+  if [ ! -e "$n" ] && [ ! -L "$n" ]; then
+    mkdir -p "$(dirname "$n")" || { warn "  $lab：建父目录失败"; return 1; }
+    if mv "$o" "$n"; then BASE_MOVE_WHAT="$o → $n"; log "  $lab：$BASE_MOVE_WHAT"; return 0; fi
+    BASE_MOVE_WHAT="mv 失败（跨设备？权限？）"
+    warn "  $lab：$BASE_MOVE_WHAT（$o → $n）"
+    return 1
+  fi
+  # 两边都在 → 逐项并入，同名**不覆盖**（中途失败重跑就走这一支；绝不 rm）
+  for e in "$o"/* "$o"/.[!.]* "$o"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    bn="$(basename "$e")"
+    if [ -e "$n/$bn" ] || [ -L "$n/$bn" ]; then
+      skipped=$((skipped+1)); warn "  $lab：$n/$bn 已存在 → 跳过（人工核对）"
+      continue
+    fi
+    if mv "$e" "$n/$bn"; then moved=$((moved+1)); else warn "  $lab：mv 失败 $e"; fi
+  done
+  BASE_MOVE_WHAT="并入 $moved 项，跳过 $skipped 项"
+  log "  $lab：$BASE_MOVE_WHAT"
+  if rmdir "$o" 2>/dev/null; then log "  $lab：旧目录已空，摘掉 $o"; fi
+  if [ "$skipped" = "0" ]; then return 0; fi
+  return 1
+}
+
+base_fix_entries() {  # <新检出根>：把入口软链修到新检出根（幂等）
+  local nm="$1" l t
+  if [ -f "$nm/Rdsh.sh" ]; then
+    l="$nm/rdsh"
+    if [ ! -L "$l" ] || [ "$(readlink "$l" 2>/dev/null)" != "$nm/Rdsh.sh" ]; then
+      if ln -sfn "$nm/Rdsh.sh" "$l"; then log "  入口：$l → $nm/Rdsh.sh"; fi
+    fi
+  fi
+  local b="${RDSH_ENTRY_BIN_DIR:-$HOME/.local/bin}"
+  l="$b/rdsh"
+  if [ -L "$l" ]; then
+    t="$(readlink "$l" 2>/dev/null || true)"
+    if [ -f "$nm/Rdsh.sh" ] && [ "$t" != "$nm/Rdsh.sh" ]; then
+      case "$t" in *Rdsh.sh) if ln -sfn "$nm/Rdsh.sh" "$l"; then log "  入口：$l → $nm/Rdsh.sh"; fi ;; esac
+    fi
+  fi
+  return 0
+}
+
+base_heal_assets() {  # <数据根> <资产根>：6 条资产软链自愈（缺则建、指错则改；真文件不动）
+  local data="$1" shared="$2" names="AGENTS.md skills lessons.md facts.md backlog.md .agent-presets"
+  local d n t
+  if [ ! -d "$shared" ]; then warn "  资产根不存在：$shared（跳过资产链自愈）"; return 0; fi
+  for d in "$data"/*; do
+    [ -d "$d" ] || continue
+    for n in $names; do
+      [ -e "$shared/$n" ] || continue
+      if [ -L "$d/$n" ]; then
+        t="$(readlink "$d/$n" 2>/dev/null || true)"
+        if [ "$t" != "$shared/$n" ]; then
+          if ln -sfn "$shared/$n" "$d/$n"; then log "  资产链：$d/$n → $shared/$n"; fi
+        fi
+      elif [ ! -e "$d/$n" ]; then
+        if ln -s "$shared/$n" "$d/$n"; then log "  资产链：$d/$n → $shared/$n"; fi
+      fi
+    done
+  done
+  return 0
+}
+
+# ---- 自动跟上：计划 → 确认 → 搬迁 → 重绑 → 入口 → 资产 → 配置 → 自检 → 还原清单 ----
+base_autofollow() {  # <新根> <dry> <yes>
+  local newb="$1" dry="$2" yes="$3"
+  local oldb="$BASE"
+  if [ "$newb" = "$oldb" ]; then
+    log "当前根与目标根相同（$oldb）—— 没有可搬的东西"
+    echo '  自检：'; printf '    %s\n' "$(base_std_path "$newb" MANAGE_ROOT)" "$(base_std_path "$newb" DATA_ROOT)"
+    return 0
+  fi
+
+  # ① 前置守卫：环境覆盖 / 配置逐项覆盖 / 在跑实例
+  if [ -n "${RDSH_BASE:-}" ]; then
+    die "环境变量 RDSH_BASE=$RDSH_BASE 正压着配置文件 → 改配置不会生效；自动跟上会算错目标。
+  → 先 unset RDSH_BASE，或改用 \`rdsh base $newb --set\`（只改指向）。本次什么都没动。"
+  fi
+  local ovr="" cfgo="" k v
+  for k in RDSH_MANAGE_ROOT RDSH_DATA_ROOT RDSH_BACKUP_ROOT RDSH_SHARED_HOME DSH_LOG_DIR \
+           RDSH_RUN_DIR RDSH_STATE_ROOT RDSH_TRASH RDSH_PLUGIN_ROOT RDSH_PATCHES RDSH_DEBUG_ROOT RDSH_MYDSH_REPO; do
+    eval "v=\${$k:-}"
+    [ -n "$v" ] && ovr="$ovr $k"
+  done
+  for k in MANAGE_ROOT DATA_ROOT BACKUP_ROOT SHARED_ROOT LOG_DIR RUN_DIR STATE_ROOT TRASH_ROOT PLUGIN_ROOT PATCHES DEBUG_ROOT; do
+    [ -n "$(cfg_get "$k")" ] && cfgo="$cfgo $k"
+  done
+  if [ -n "$ovr$cfgo" ]; then
+    die "有**逐项覆盖**在生效（环境：${ovr:-无}；配置：${cfgo:-无}）—— 这些不随 BASE 走，自动跟上会把目标算错。
+  → 去掉这些覆盖行/变量，或改用 \`rdsh base $newb --set\`。本次什么都没动。"
+  fi
+  local p _pid ver dir data kind id unit st busy=""
+  while IFS='|' read -r p _pid ver dir data kind id unit st; do
+    [ -n "$p" ] || continue
+    if base_prefix_hit "${dir:-}" "$oldb"; then busy="$busy $p(检出)" ; fi
+    if base_prefix_hit "${data:-}" "$oldb"; then busy="$busy $p(数据)" ; fi
+  done <<< "$(instances_live)"
+  if [ -n "$busy" ]; then
+    die "旧根里的东西正被实例使用 → **先停再搬**（写入者运行时不动它的数据）：
+  端口：$busy
+  → rdsh stop --all 之后再执行本命令。本次什么都没动。"
+  fi
+
+  # ② 目标根与搬迁项
+  local new_manage new_data new_shared new_state old_manage
+  old_manage="$(base_cur_path MANAGE_ROOT)"
+  new_manage="$(base_std_path "$newb" MANAGE_ROOT)"
+  new_data="$(base_std_path "$newb" DATA_ROOT)"
+  new_shared="$(base_std_path "$newb" SHARED_ROOT)"
+  new_state="$(base_std_path "$newb" STATE_ROOT)"
+
+  # 上次没做完的搬迁？→ 允许"并入"续跑；否则新根已是另一个根就不许混
+  local resume=0 m
+  if [ -d "$new_state" ]; then
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      # 清单里写的是 `- old=<路径>`（人读），判据要容忍两种写法（冒烟抓出来的）
+      if grep -qx -- "old=$oldb" "$m" 2>/dev/null || grep -qx -- "- old=$oldb" "$m" 2>/dev/null; then resume=1; fi
+    done < <(find "$new_state" -maxdepth 1 -name 'base-move-*.inprogress.md' 2>/dev/null)
+  fi
+  local -a foreign=()
+  [ -e "$new_state/versions.kv" ] && foreign+=("$new_state/versions.kv")
+  [ -e "$new_manage/Rdsh.sh" ] && foreign+=("$new_manage/Rdsh.sh")
+  if [ -d "$new_data" ] && [ -n "$(find "$new_data" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)" ]; then
+    foreign+=("$new_data（已有内容）")
+  fi
+  if [ "${#foreign[@]}" -gt 0 ] && [ "$resume" != "1" ] && [ "$dry" != "1" ]; then
+    die "目标根看起来是**另一个根**（已有：${foreign[*]}）—— 把两个根合起来不是本命令该擅自做的事。
+  → 要在多根之间**切指向**：rdsh base $newb --set
+  → 确实要并进来：先自己搬走/清空上面这些，再重跑本命令。本次什么都没动。"
+  fi
+
+  local -a ols=() nws=() labs=()
+  local i o n act size
+  for k in $BASE_ROOT_KEYS; do
+    o="$(base_cur_path "$k")"; n="$(base_std_path "$newb" "$k")"
+    ols+=("$o"); nws+=("$n"); labs+=("$(base_root_label "$k")")
+  done
+
+  echo
+  echo '改根计划（默认 = 自动跟上）：'
+  printf '  旧根     : %s\n  新根     : %s\n  配置文件 : %s（会先备份）\n' "$oldb" "$newb" "$RDSH_CONFIG"
+  local fs_old fs_new
+  fs_old="$(df -Pk "$oldb" 2>/dev/null | tail -1 | awk '{print $1}' || true)"
+  fs_new="$(df -Pk "$(dirname "$newb")" 2>/dev/null | tail -1 | awk '{print $1}' || true)"
+  for i in "${!ols[@]}"; do
+    o="${ols[$i]}"; n="${nws[$i]}"; act="搬迁"
+    if [ "$o" = "$n" ]; then act="无需（已同位）"
+    elif ! base_prefix_hit "$o" "$oldb"; then act="保持（在旧根之外，本命令不涉及）"; fi
+    if [ ! -e "$o" ]; then act="$act（旧路径不存在）"
+    elif [ -e "$n" ]; then act="$act（目标已存在 → 逐项并入，不覆盖）"; fi
+    size=""
+    if [ -e "$o" ]; then size=" $(du_size "$o" 2>/dev/null || true)"; fi
+    printf '  %-12s %-52s → %-52s %s%s\n' "${labs[$i]}" "$o" "$n" "$act" "$size"
+  done
+  if [ -n "$fs_old" ] && [ -n "$fs_new" ] && [ "$fs_old" != "$fs_new" ]; then
+    warn "  跨文件系统（$fs_old → $fs_new）：mv 会退化成『复制+删除』，慢且需要额外空间"
+  fi
+  echo '  动作：① 建目录骨架 ② 逐棵搬迁（幂等，可中断重跑）③ 全盘重绑（软链/账本/.map/注册表/回声/入口）'
+  echo '        ④ 6 条资产软链自愈 ⑤ 改配置 ⑥ 自检（零残留扫描 + --json 复核）⑦ 留还原清单'
+  echo "  可还原：清单 + 还原脚本落在 $new_state/base-move-<时间戳>.{md,restore.sh}"
+
+  if [ "$dry" = "1" ]; then
+    echo
+    echo '（--dry-run：只出计划，盘上什么都没动）'
+    echo "执行：rdsh base $newb"
+    echo "只改指向（不搬）：rdsh base $newb --set"
+    return 0
+  fi
+  if [ "$yes" != "1" ] && has_tty; then
+    local ans=""
+    printf '\n确认执行以上搬迁？[y/N] ' >&2
+    read -r ans || ans=""
+    case "$ans" in y|Y|yes|YES|是) : ;; *) warn '已取消（盘上什么都没动）'; return 1 ;; esac
+  fi
+
+  # ③ 执行
+  local ts manifest tmpm
+  ts="$(date +%Y%m%d-%H%M%S)"
+  manifest="$new_state/base-move-$ts.md"
+  tmpm="$new_state/base-move-$ts.inprogress.md"
+  mkdir -p "$newb" "$new_state" || die "建不了新根骨架：$new_state"
+  for k in $BASE_ROOT_KEYS; do
+    n="$(base_std_path "$newb" "$k")"
+    mkdir -p "$n" 2>/dev/null || true
+  done
+  chmod 700 "$new_state" "$(base_std_path "$newb" LOG_DIR)" "$(base_std_path "$newb" RUN_DIR)" \
+            "$(base_std_path "$newb" TRASH_ROOT)" "$(base_std_path "$newb" DATA_ROOT)" 2>/dev/null || true
+  ( umask 077
+    { printf '<!-- rdsh-base-move —— 由 rdsh base 生成；还原命令见文末（勿手改本文件） -->\n'
+      printf '# 基根搬迁 %s\n\n' "$ts"
+      printf -- '- old=%s\n- new=%s\n- config=%s\n- config_bak=%s\n- pid=%s\n\n' \
+        "$oldb" "$newb" "$RDSH_CONFIG" "(见下)" "$$"
+      printf '## 一、逐项迁移结果\n\n'
+    } > "$tmpm" )
+
+  local -a undo=() pairs=()
+  echo
+  log '① 搬迁（幂等；中断后重跑同一条命令即可续）'
+  for i in "${!ols[@]}"; do
+    o="${ols[$i]}"; n="${nws[$i]}"
+    [ "$o" = "$n" ] && continue
+    if ! base_prefix_hit "$o" "$oldb"; then
+      printf -- '- %s：`%s` 在旧根之外 → 未动\n' "${labs[$i]}" "$o" >> "$tmpm"
+      continue
+    fi
+    if base_move_tree "${labs[$i]}" "$o" "$n"; then
+      printf -- '- %s：`%s` → `%s`（%s）\n' "${labs[$i]}" "$o" "$n" "$BASE_MOVE_WHAT" >> "$tmpm"
+      undo+=("$n|$o")
+    else
+      printf -- '- %s：`%s` → `%s` **未完成/有冲突 → 需人工**（%s）\n' "${labs[$i]}" "$o" "$n" "$BASE_MOVE_WHAT" >> "$tmpm"
+      undo+=("$n|$o")
+    fi
+    pairs+=("$o" "$n")
+  done
+  # 兜底一对：旧根下不属于任何已知根的引用（放最后＝前缀最短，最后才匹配）
+  pairs+=("$oldb" "$newb")
+
+  # 搬空的父目录顺手摘掉（rmdir 只吃空目录；不碰旧根本身，也不碰还有东西的目录）
+  local po
+  for i in "${!ols[@]}"; do
+    o="${ols[$i]}"
+    base_prefix_hit "$o" "$oldb" || continue
+    po="$(dirname "$o")"
+    while [ "$po" != "$oldb" ] && [ "$po" != "/" ] && [ -d "$po" ]; do
+      if [ -z "$(find "$po" -mindepth 1 -maxdepth 1 2>/dev/null | head -1)" ]; then
+        rmdir "$po" 2>/dev/null || break
+        log "  空父目录已摘掉：$po"
+        po="$(dirname "$po")"
+      else
+        break
+      fi
+    done
+  done
+
+  echo
+  log '② 全盘重绑（把指着旧根的软链/账本/注册表/回声/入口改指新根）'
+  BASE_SCOPE_OVERRIDE="$newb"
+  base_rebind_all "${pairs[@]}"
+  log '③ 入口'
+  base_fix_entries "$new_manage"
+  if [ ! -f "$new_manage/Rdsh.sh" ]; then
+    warn "  新检出根里没有 Rdsh.sh（旧根本来就没有检出可搬）→ 工具本体没跟过来："
+    printf '     要部署一份到新根：bash %s/bootstrap.sh --base %s\n' "$old_manage" "$newb"
+    printf -- '- ⚠ 新检出根为空：工具本体没搬（旧根无检出）；部署：`bash %s/bootstrap.sh --base %s`\n' "$old_manage" "$newb" >> "$tmpm"
+  fi
+  log '④ 6 条资产软链自愈'
+  base_heal_assets "$new_data" "$new_shared"
+
+  log '⑤ 改配置'
+  local cfg_bak=""
+  if [ -f "$RDSH_CONFIG" ]; then
+    cfg_bak="$RDSH_CONFIG.bak_$(date +%m%d_%H%M%S)"
+    cp -p "$RDSH_CONFIG" "$cfg_bak" || warn "  配置备份失败：$cfg_bak"
+  fi
+  mkdir -p "$(dirname "$RDSH_CONFIG")"
+  touch "$RDSH_CONFIG"
+  awk -v nb="$newb" '
+    BEGIN { done=0 }
+    /^[[:space:]]*BASE[[:space:]]*=/ { print "BASE=" nb; done=1; next }
+    { print }
+    END { if (!done) print "BASE=" nb }
+  ' "$RDSH_CONFIG" > "$RDSH_CONFIG.tmp.$$" && mv -f "$RDSH_CONFIG.tmp.$$" "$RDSH_CONFIG" \
+    || warn "  配置写入失败：$RDSH_CONFIG"
+  log "  $RDSH_CONFIG 里的 BASE=$newb"
+  printf -- '- 配置：`%s` 的 BASE → `%s`（备份：`%s`）\n' "$RDSH_CONFIG" "$newb" "${cfg_bak:-无}" >> "$tmpm"
+  printf '%s|base-move|%s|根搬迁：%s → %s\n' "$(date -Is)" "$newb" "$oldb" "$newb" >> "$new_state/journal.log" 2>/dev/null || true
+
+  # ④ 自检
+  echo
+  log '⑥ 自检'
+  local miss=0
+  for i in "${!nws[@]}"; do
+    n="${nws[$i]}"
+    if [ -e "$n" ]; then printf '  ✓ %-12s %s\n' "${labs[$i]}" "$n"
+    else printf '  ✗ %-12s %s（缺失）\n' "${labs[$i]}" "$n"; miss=$((miss+1)); fi
+  done
+  # 自证"报告随当前根走"：优先用新根里的那份脚本；退化情形（全新根、工具本体没搬）
+  # 就用当前这份 —— 子进程只给 RDSH_CONFIG，等于"一个新进程照配置重新解析一遍"（冒烟抓出来的坑）
+  local js="" jsrun=""
+  if [ -f "$new_manage/Rdsh.sh" ]; then jsrun="$new_manage/Rdsh.sh"
+  elif [ -f "$SELF" ]; then jsrun="$SELF"; warn "  新检出根里没有 Rdsh.sh → 改用当前这份脚本（$SELF）复核对配置的解析"
+  fi
+  if [ -n "$jsrun" ]; then
+    js="$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+            -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_STATE_ROOT -u RDSH_PLUGIN_ROOT \
+            -u RDSH_PATCHES -u RDSH_DEBUG_ROOT -u DSH_LOG_DIR \
+            RDSH_CONFIG="$RDSH_CONFIG" bash "$jsrun" base --json 2>&1 || true)"
+  fi
+  printf '  --json 复核（脚本：%s）：%s\n' "$jsrun" "$js"
+  case "$js" in
+    *"\"base\":\"$newb\""*) log "  ✓ rdsh base --json 已报告新根 $newb" ;;
+    *) warn "  ✗ rdsh base --json 没有报告新根 $newb（上面是原文）" ; miss=$((miss+1)) ;;
+  esac
+  echo '  零残留扫描：'
+  local res=0
+  base_residue_scan "${ols[@]}" "$oldb" || res=$?
+
+  # ⑤ 还原清单 + 还原脚本
+  # 还原脚本必须**自包含**：它要能在一台"刚搬完"的机器上直接跑，不依赖调用者的环境
+  # （冒烟抓出来的坑：第一版把 $RDSH_CONFIG 原样写进脚本，脚本里没人定义它 → 未绑定就挂）
+  local rs="$new_state/base-move-$ts.restore.sh"
+  {
+    printf '#!/bin/bash\n'
+    printf '# 由 rdsh base 生成：把 %s 的搬迁还原回 %s（逐条可核）\n' "$newb" "$oldb"
+    printf '# 生成时间：%s\n' "$(date -Is)"
+    printf '# 用法：bash %s\n' "$rs"
+    printf 'set -u\n'
+    printf 'RDSH_CONFIG=%q\n' "$RDSH_CONFIG"
+    printf 'RDSH_ENTRY_BIN_DIR=%q\n' "${RDSH_ENTRY_BIN_DIR:-$HOME/.local/bin}"
+    printf '# 必须 export：下面几处是**子进程**跑 rdsh，否则子进程读不到这个配置（冒烟抓出来的坑）\n'
+    printf 'export RDSH_CONFIG RDSH_ENTRY_BIN_DIR\n'
+    printf 'OLD=%q\nNEW=%q\nOLDMANAGE=%q\nNEWMANAGE=%q\n\n' "$oldb" "$newb" "$old_manage" "$new_manage"
+    printf 'echo "[还原] ① 先把配置改回旧根（这样 rdsh 又指向 %s）"\n' "$oldb"
+    printf 'awk -v nb="$OLD" '\''BEGIN{d=0} /^[[:space:]]*BASE[[:space:]]*=/{print "BASE=" nb; d=1; next} {print} END{if(!d) print "BASE=" nb}'\'' "$RDSH_CONFIG" > "$RDSH_CONFIG.tmp.$$" && mv -f "$RDSH_CONFIG.tmp.$$" "$RDSH_CONFIG"\n'
+    printf '\n\necho "[还原] ② 把每一棵搬回去（目标已存在就跳过，绝不覆盖）"\n'
+    local u nu no
+    for u in "${undo[@]}"; do
+      nu="${u%%|*}"; no="${u#*|}"
+      # 目标父目录可能已被"空父目录清理"摘掉 → 先 mkdir -p，否则 mv 会因父目录不存在而失败（冒烟抓出来的）
+      printf 'if [ -e %q ] && [ ! -e %q ]; then mkdir -p "$(dirname %q)" && mv %q %q && echo "  %s → %s"; else echo "  跳过（状态不符，人工核对）：%s"; fi\n' \
+        "$nu" "$no" "$no" "$nu" "$no" "$nu" "$no" "$no"
+    done
+    printf '\n\necho "[还原] ③ 反向重绑：把树里指向新根的引用改回旧根"\n'
+    printf 'if [ -f "$OLDMANAGE/Rdsh.sh" ]; then\n'
+    printf '  bash "$OLDMANAGE/Rdsh.sh" base --repoint "$NEW" "$OLD" || echo "  反向重绑有残留，看上面输出"\n'
+    printf 'else\n  echo "  找不到 $OLDMANAGE/Rdsh.sh，跳过（手工核对软链）"\nfi\n'
+    printf '\n\necho "[还原] ④ 自检：扫描还有多少东西指着新根（rc=0 才算干净）"\n'
+    printf 'if [ -f "$OLDMANAGE/Rdsh.sh" ]; then bash "$OLDMANAGE/Rdsh.sh" base --residue "$NEW"; fi\n'
+    printf '\necho "[还原] 完成。核对：rdsh base && rdsh doctor"\n'
+  } > "$rs" 2>/dev/null && chmod +x "$rs" 2>/dev/null || warn "  还原脚本生成失败：$rs"
+
+  {
+    printf '\n## 二、自检结果\n\n'
+    printf -- '- 骨架：%s 个根，缺失 %s 个\n' "${#nws[@]}" "$miss"
+    printf -- '- `rdsh base --json`：%s\n' "${js:-取不到}"
+    printf -- '- 零残留扫描：指向旧根的引用 %s 处（扫描原文见上）\n' "$res"
+    printf '\n## 三、还原（一键）\n\n```bash\nbash %s\n```\n\n' "$rs"
+    printf '逐条还原命令（与还原脚本同一份内容的明细）：\n\n```bash\n'
+    printf '# ① 配置改回旧根\n'
+    printf 'awk -v nb=%q '\''BEGIN{d=0} /^[[:space:]]*BASE[[:space:]]*=/{print "BASE=" nb; d=1; next} {print} END{if(!d) print "BASE=" nb}'\'' %q > %q.tmp && mv -f %q.tmp %q\n' \
+      "$oldb" "$RDSH_CONFIG" "$RDSH_CONFIG" "$RDSH_CONFIG" "$RDSH_CONFIG"
+    printf '# ② 逐棵搬回（目标已存在就跳过，绝不覆盖）\n'
+    local u2 nu2 no2
+    for u2 in "${undo[@]}"; do
+      nu2="${u2%%|*}"; no2="${u2#*|}"
+      printf 'if [ -e %q ] && [ ! -e %q ]; then mv %q %q; fi\n' "$nu2" "$no2" "$nu2" "$no2"
+    done
+    printf '# ③ 反向重绑 + ④ 自检\n'
+    printf 'bash %q base --repoint %q %q\n' "$old_manage/Rdsh.sh" "$newb" "$oldb"
+    printf 'bash %q base --residue %q   # rc=0 才算干净\n' "$old_manage/Rdsh.sh" "$newb"
+    printf '```\n\n'
+    printf '## 四、说明\n\n'
+    printf -- '- 还原脚本先改回配置、再逐棵搬回、再反向重绑，最后用零残留扫描自证。\n'
+    printf -- '- `journal.log` 与历次 `base-move-*.md` 里留着旧路径 —— 那是**只追加的历史**，按设计不算活引用。\n'
+    printf -- '- 若旧根下还有不属于本工具的目录（不是引用），本命令不搬也不动它们。\n'
+  } >> "$tmpm"
+  mv -f "$tmpm" "$manifest"
+  # 上次中断留下的标记（同一个旧根）：归档改名，别让"半截清单"继续冒充进行中
+  local stale
+  while IFS= read -r stale; do
+    [ -n "$stale" ] || continue
+    if grep -qx -- "old=$oldb" "$stale" 2>/dev/null || grep -qx -- "- old=$oldb" "$stale" 2>/dev/null; then
+      if mv -f "$stale" "${stale%.md}.superseded.md" 2>/dev/null; then
+        log "  上次中断留下的标记已归档：${stale%.md}.superseded.md"
+      fi
+    fi
+  done < <(find "$new_state" -maxdepth 1 -name 'base-move-*.inprogress.md' 2>/dev/null)
+
+  echo
+  log '⑦ 还原清单'
+  printf '  清单：%s\n  还原：bash %s\n' "$manifest" "$rs"
+  echo
+  if [ "$miss" != "0" ] || [ "$res" != "0" ]; then
+    warn "搬迁做完，但自检没全绿（缺失 $miss 项 / 残留引用 $res 处）—— 按上面逐条处理，或直接跑还原脚本退回。"
+    return 1
+  fi
+  log "改根完成：$oldb → $newb"
+  echo '  下一步：rdsh list / rdsh doctor / rdsh base --json 各看一眼；要退回照上面那条 bash 跑。'
+  return 0
+}
+
+cmd_base_usage() {
+  cat <<'USAGE'
+rdsh base —— 基目录（唯一旋钮 BASE）的查看与切换
+
+用法:
+  rdsh base                          人读报告：当前从 BASE 解析出哪些根
+  rdsh base --json                   机器可读（13 个键的 JSON）
+  rdsh base --print-paths            可 eval 的 KEY=value 行
+
+  rdsh base <新根>                   **默认自动跟上**：出计划 → 确认 → 搬迁 → 重绑 → 修入口
+                                     → 自检 → 留还原清单（幂等，可中断重跑）
+  rdsh base <新根> --dry-run         只出计划
+  rdsh base <新根> --yes             不问，直接按计划执行（非交互时自动如此）
+  rdsh base <新根> --set             只改配置里 BASE 一行，不搬任何东西（多根之间切换用）
+
+  rdsh base --residue <旧根>…        零残留扫描：数"还有多少东西指着旧根"（rc=1 表示有）
+  rdsh base --repoint <旧> <新>      纯重绑：把全盘引用由旧前缀改指新前缀（不搬文件）
+  rdsh base --unset                  删掉配置里的 BASE 行（回到默认 $HOME/Mapp）
+
+选项:
+  --scope <目录>                     追加扫描/重绑范围（可重复；默认 BASE + 入口目录 + 桌面目录）
+USAGE
+}
+
 cmd_base() {
-  local arg="" unset=0 dry=0 a
-  for a in "$@"; do case "$a" in --unset) unset=1 ;; --dry-run) dry=1 ;; *) arg="$a" ;; esac; done
+  local arg="" unset=0 dry=0 json=0 printenv=0 setonly=0 yes=0 resflag=0 repflag=0 a
+  local -a POS=()
+  BASE_SCOPE_EXTRA=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --unset) unset=1 ;;
+      --dry-run|-n) dry=1 ;;
+      --json) json=1 ;;
+      --print-paths) printenv=1 ;;
+      --set|--only-point) setonly=1 ;;
+      --yes|-y) yes=1 ;;
+      --residue) resflag=1 ;;
+      --repoint) repflag=1 ;;
+      --scope) if [ $# -gt 1 ]; then BASE_SCOPE_EXTRA+=("$2"); shift; fi ;;
+      --scope=*) BASE_SCOPE_EXTRA+=("${a#--scope=}") ;;
+      -h|--help) cmd_base_usage; return 0 ;;
+      -*) die "未知选项：$a（rdsh base --help 看用法）" ;;
+      *) POS+=("$a") ;;
+    esac
+    shift || true
+  done
+
+  # ── 机器可读出口（2026-10-12 加）────────────────────────────────────────────
+  # 为什么必须有：此前"当前根解析出哪些路径"只有人读报告，于是**每个消费者都自己写死布局**
+  # （冒烟夹具写 $BASE/dsh + $BASE/.dsh-*、插件自己拼、文档各写一份）——布局约定一改就集体失配。
+  # 有了它，脚本/测试/插件一律 `eval "$(rdsh base --print-paths)"` 或读 `--json`，
+  # **本工具即唯一真源**；这也是"多根/切根"的地基（报告随当前根走，消费者不必知道换过根）。
+  if [ "$json" = "1" ]; then
+    printf '{"base":"%s","config":"%s","manageRoot":"%s","dataRoot":"%s","sharedRoot":"%s","backupRoot":"%s","logDir":"%s","runDir":"%s","stateRoot":"%s","trashRoot":"%s","pluginRoot":"%s","patchesRoot":"%s","port":%s}\n' \
+      "$BASE" "$RDSH_CONFIG" "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" "$RUN_DIR" "$STATE_ROOT" "$TRASH_ROOT" "$PLUGIN_ROOT" "$PATCHES_ROOT" "$WEB_PORT"
+    return 0
+  fi
+  if [ "$printenv" = "1" ]; then
+    # 供 `eval` 用；变量名与 rdsh 自己的内部名一致
+    printf 'BASE=%q\nMANAGE_ROOT=%q\nDATA_ROOT=%q\nSHARED_ROOT=%q\nBACKUP_ROOT=%q\nLOG_DIR=%q\nRUN_DIR=%q\nSTATE_ROOT=%q\nTRASH_ROOT=%q\nPLUGIN_ROOT=%q\nPATCHES_ROOT=%q\nWEB_PORT=%q\n' \
+      "$BASE" "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" "$RUN_DIR" "$STATE_ROOT" "$TRASH_ROOT" "$PLUGIN_ROOT" "$PATCHES_ROOT" "$WEB_PORT"
+    return 0
+  fi
+
+  # 零残留扫描（可复跑；rc=1 表示还有引用指着旧根）
+  if [ "$resflag" = "1" ]; then
+    if [ "${#POS[@]}" -lt 1 ]; then die '用法: rdsh base --residue <旧根> [<旧根>…] [--scope <目录>]'; fi
+    local -a olds=()
+    for a in "${POS[@]}"; do olds+=("$(expand "$a")"); done
+    local rc=0
+    base_residue_scan "${olds[@]}" || rc=$?
+    return "$rc"
+  fi
+  # 纯重绑（还原脚本用它；不搬任何文件）
+  if [ "$repflag" = "1" ]; then
+    if [ "${#POS[@]}" -lt 2 ]; then die '用法: rdsh base --repoint <旧前缀> <新前缀> [--scope <目录>] [--dry-run]'; fi
+    local rf rt
+    rf="$(expand "${POS[0]}")"; rt="$(expand "${POS[1]}")"
+    if [ "$dry" = "1" ]; then
+      local rc2=0
+      base_residue_scan "$rf" || rc2=$?
+      return "$rc2"
+    fi
+    base_rebind_all "$rf" "$rt"
+    log "完成。核对：rdsh base --residue $rf"
+    return 0
+  fi
 
   echo '当前解析（优先级：环境变量 > 配置文件 > 默认）：'
+  local bsrc='内置默认 $HOME/Mapp'
+  if [ -n "$(cfg_get BASE)" ]; then bsrc="配置文件 $RDSH_CONFIG"; fi
+  if [ -n "${RDSH_BASE:-}" ]; then bsrc="环境变量 RDSH_BASE"; fi
   printf '  配置文件   : %s%s\n' "$RDSH_CONFIG" "$([ -f "$RDSH_CONFIG" ] && echo '' || echo '（不存在）')"
-  printf '  基目录 BASE: %s\n' "$BASE"
+  printf '  基目录 BASE: %s（来源：%s）\n' "$BASE" "$bsrc"
   printf '  检出根     : %s\n' "$MANAGE_ROOT"
   printf '  数据根     : %s\n' "$DATA_ROOT"
   printf '  作者资产根 : %s\n' "$SHARED_ROOT"
@@ -2064,17 +2916,23 @@ cmd_base() {
   printf '  实例注册表 : %s（注解层）\n' "$RUN_DIR"
   printf '  状态账本   : %s（唯一权威）\n' "$STATE_ROOT"
   printf '  回收站     : %s（同文件系统：%s）\n' "$TRASH_ROOT" "$( [ -d "$TRASH_ROOT" ] && [ "$(trash_fs_of "$TRASH_ROOT")" = "$(trash_fs_of "$BASE")" ] && echo 是 || echo '否/待建' )"
+  printf '  插件权威副本: %s\n' "$PLUGIN_ROOT"
+  printf '  补丁仓     : %s\n' "$PATCHES_ROOT"
+  printf '  调试沙箱根 : %s\n' "$DEBUG_ROOT"
   printf '  默认端口   : %s\n' "$WEB_PORT"
   [ -n "${RDSH_BASE:-}" ] && warn "环境变量 RDSH_BASE=$RDSH_BASE 正在覆盖配置文件（改配置不会生效）"
 
-  if [ -z "$arg" ] && [ "$unset" = "0" ]; then
+  arg="${POS[0]:-}"
+  if [ -z "$arg" ] && [ "$unset" = "0" ] && [ "${#POS[@]}" -eq 0 ]; then
     echo
     echo '改基目录（示例）：'
-    printf '  rdsh base %s      # 检出在 %s/dsh、数据在 %s/.dsh、备份在 %s/.dsh-backup\n' "$HOME" "$HOME" "$HOME" "$HOME"
-    printf '  rdsh base %s      # 回到当前这种布局\n' "$HOME/Mapp"
-    echo  '  rdsh base --unset                 # 删掉配置里的 BASE，回到默认 $HOME/Mapp'
+    echo  '  rdsh base <新路径>            # 默认**自动跟上**：搬检出/数据/资产/账本 + 重绑 + 修入口 + 自检 + 还原清单'
+    echo  '  rdsh base <新路径> --set      # 只改指向，不搬任何东西（多根之间切换用）'
+    echo  '  rdsh base <新路径> --dry-run  # 只出搬迁计划'
+    echo  '  rdsh base --residue <旧根>    # 零残留扫描：还有多少东西指着旧根（rc=1=有）'
+    echo  '  rdsh base --unset             # 删掉配置里的 BASE，回到默认 $HOME/Mapp'
     echo
-    echo '说明：本命令只改 rdsh 的指向，**不搬动**任何现有检出/数据；新位置为空时会自动创建。'
+    echo '说明：默认会把"改根"当搬家做完（盘上的数据、软链、账本、入口一起跟上），并留还原清单。'
     return 0
   fi
 
@@ -2089,25 +2947,36 @@ cmd_base() {
 
   case "$arg" in /*|~*) ;; *) die "基目录必须是绝对路径或以 ~ 开头（收到：$arg）" ;; esac
   arg="$(expand "$arg")"
-  if [ "$dry" = "1" ]; then
-    echo "[dry-run] 将把 BASE=$arg 写入 $RDSH_CONFIG（不创建目录、不搬数据）"
+  case "$arg" in */) arg="${arg%/}" ;; esac
+  [ -n "$arg" ] || die '基目录不能为空'
+
+  # 老行为：只改配置一行（P1：只改指向，不搬数据）
+  if [ "$setonly" = "1" ]; then
+    if [ "$dry" = "1" ]; then
+      echo "[dry-run] 将把 BASE=$arg 写入 $RDSH_CONFIG（不创建目录、不搬数据）"
+      return 0
+    fi
+    [ -d "$arg" ] || { log "创建基目录 $arg"; mkdir -p "$arg"; }
+    touch "$RDSH_CONFIG"
+    if grep -qE '^[[:space:]]*BASE[[:space:]]*=' "$RDSH_CONFIG"; then
+      awk -v nb="$arg" '/^[[:space:]]*BASE[[:space:]]*=/{print "BASE=" nb; next} {print}' \
+        "$RDSH_CONFIG" > "$RDSH_CONFIG.tmp.$$" && mv -f "$RDSH_CONFIG.tmp.$$" "$RDSH_CONFIG"
+    else
+      printf 'BASE=%s\n' "$arg" >> "$RDSH_CONFIG"
+    fi
+    log "已写入 BASE=$arg → $RDSH_CONFIG"
+    echo
+    warn '--set：只改 rdsh 的**指向**，现有数据/检出一个都没动（原则 P1）：'
+    printf '  现有检出仍在 : %s\n' "$MANAGE_ROOT"
+    printf '  现有数据仍在 : %s\n' "$DATA_ROOT"
+    printf '  新的检出根   : %s\n' "$(base_std_path "$arg" MANAGE_ROOT)"
+    printf '  新的数据根   : %s\n' "$(base_std_path "$arg" DATA_ROOT)"
+    printf '  新根已有内容 : %s（多根切换不必搬；要真搬用默认的那条：rdsh base %s）\n' \
+      "$([ -d "$(base_std_path "$arg" STATE_ROOT)" ] && echo '是（像另一个根）' || echo '无')" "$arg"
     return 0
   fi
-  [ -d "$arg" ] || { log "创建基目录 $arg"; mkdir -p "$arg"; }
-  touch "$RDSH_CONFIG"
-  if grep -qE '^[[:space:]]*BASE[[:space:]]*=' "$RDSH_CONFIG"; then
-    sed -i "s|^[[:space:]]*BASE[[:space:]]*=.*|BASE=$arg|" "$RDSH_CONFIG"
-  else
-    printf 'BASE=%s\n' "$arg" >> "$RDSH_CONFIG"
-  fi
-  log "已写入 BASE=$arg → $RDSH_CONFIG"
-  echo
-  warn '本命令只改 rdsh 的**指向**，现有数据/检出一个都没动（原则 P1）：'
-  printf '  现有检出仍在 : %s\n' "$MANAGE_ROOT"
-  printf '  现有数据仍在 : %s\n' "$DATA_ROOT"
-  printf '  新的检出根   : %s/dsh\n' "$arg"
-  printf '  新的数据根   : %s/.dsh\n' "$arg"
-  printf '  要搬家请自行 rsync/mv，或用重装（rdsh fetch && rdsh install）后把数据目录拷过去。\n'
+
+  base_autofollow "$arg" "$dry" "$yes"
 }
 
 # ---------------- logs：查看/清理启动日志 ----------------

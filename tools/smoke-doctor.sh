@@ -26,14 +26,22 @@ RD_SH="$(dirname "$(readlink -f "$SRC")")/Rdsh.sh"
 
 T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$B/dsh" "$B/.dsh-backup" "$B/.dsh-suite"
+mkdir -p "$B/dsh"
 cp -p "$SRC" "$B/dsh/doctor.sh"
-[ -f "$RD_SH" ] && cp -p "$RD_SH" "$B/dsh/Rdsh.sh"
+
+# 夹具布局**从工具推导**（2026-10-12）：此前写死 "$B/dsh" + "$B/.dsh-*"，布局约定一改夹具就集体失配。
+cp -p "$RD_SH" "$B/dsh/Rdsh.sh"   # 自定位回退需要它与 doctor.sh 同处；--print-paths 也用它
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths)"
+mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" "$STATE_ROOT"
+[ -f "$RD_SH" ] && cp -p "$RD_SH" "$MANAGE_ROOT/Rdsh.sh"
 
 # 入口链维（B11）会看 $HOME 里的 rdsh 命令/桌面图标 —— 那是**真机状态**，
 # 本冒烟的"健康环境"必须自带一套隔离入口，否则在干净 HOME（CI/新机器）下会多出 warn。
 ER="$T/entryroot"; mkdir -p "$ER/.local/bin" "$ER/.local/share/applications"
-ln -sfn "$B/dsh/Rdsh.sh" "$ER/.local/bin/rdsh"
+ln -sfn "$MANAGE_ROOT/Rdsh.sh" "$ER/.local/bin/rdsh"
 printf '[Desktop Entry]\nName=Deepseek Harness\nExec=%s\nType=Application\n' "$ER/.local/bin/rdsh" > "$ER/.local/share/applications/dsh.desktop"
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
@@ -41,10 +49,10 @@ run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_RO
           RDSH_ENTRY_ROOT="$ER" RDSH_ENTRY_BIN_DIR="$ER/.local/bin" \
           RDSH_ENTRY_DESKTOP="$ER/.local/share/applications/dsh.desktop" \
           PATH="$ER/.local/bin:$PATH" \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/doctor.sh" "$@" </dev/null; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$MANAGE_ROOT/doctor.sh" "$@" </dev/null; }
 # 造检出 + 数据 home（版本号避开真机在跑版本，防止宿主状态混入）
 mkck() { # <目录名> <版本>
-  local d="$B/dsh/$1" h="$B/.dsh/$2"
+  local d="$MANAGE_ROOT/$1" h="$DATA_ROOT/$2"
   mkdir -p "$d" "$h" && chmod 700 "$h"
   printf '{"name":"deepseek-harness","version":"%s"}\n' "$2" > "$d/package.json"
   mkdir -p "$d/node_modules" "$d/.git/info"; printf 'objects\n.installed\n' > "$d/.git/info/exclude"
@@ -55,18 +63,18 @@ mkck() { # <目录名> <版本>
 mkck ck-a 9.9.7-rc.2
 mkck ck-b 9.9.6-beta.1
 # 稳定根 + 一条正常的软链（指向稳定根）
-mkdir -p "$B/.dsh-shared"; printf 'a\n' > "$B/.dsh-shared/lessons.md"
-rm -f "$B/.dsh/9.9.7-rc.2/lessons.md"; ln -s "$B/.dsh-shared/lessons.md" "$B/.dsh/9.9.7-rc.2/lessons.md"
+mkdir -p "$SHARED_ROOT"; printf 'a\n' > "$SHARED_ROOT/lessons.md"
+rm -f "$DATA_ROOT/9.9.7-rc.2/lessons.md"; ln -s "$SHARED_ROOT/lessons.md" "$DATA_ROOT/9.9.7-rc.2/lessons.md"
 # 账本：两个对象，其中 ck-b 是 baseline
-mkdir -p "$B/.dsh-suite/state"
+mkdir -p "$STATE_ROOT"
 {
   printf '# rdsh state —— 测试账本\n'
   printf '# 字段: key|version|role|role_set_at|installed_at|source|commit|built_at|migrated_from|baseline_for|dir|data|note\n'
-  printf '9.9.7-rc.2|9.9.7-rc.2|current||2026-09-01T00:00:00+08:00|local:x||2026-09-01T00:00:00+08:00|||%s|%s|\n' "$B/dsh/ck-a" "$B/.dsh/9.9.7-rc.2"
-  printf '9.9.6-beta.1|9.9.6-beta.1|baseline||2026-09-02T00:00:00+08:00|local:y||2026-09-02T00:00:00+08:00|||%s|%s|\n' "$B/dsh/ck-b" "$B/.dsh/9.9.6-beta.1"
-} > "$B/.dsh-suite/state/versions.kv"
-printf '# rdsh journal\n2026-09-29T00:00:00+08:00|init|9.9.7-rc.2|test\n' > "$B/.dsh-suite/state/journal.log"
-printf '<!-- rdsh-generated —— 测试 -->\n# 回退基线\n' > "$B/.dsh-backup/回退基线.md"
+  printf '9.9.7-rc.2|9.9.7-rc.2|current||2026-09-01T00:00:00+08:00|local:x||2026-09-01T00:00:00+08:00|||%s|%s|\n' "$MANAGE_ROOT/ck-a" "$DATA_ROOT/9.9.7-rc.2"
+  printf '9.9.6-beta.1|9.9.6-beta.1|baseline||2026-09-02T00:00:00+08:00|local:y||2026-09-02T00:00:00+08:00|||%s|%s|\n' "$MANAGE_ROOT/ck-b" "$DATA_ROOT/9.9.6-beta.1"
+} > "$STATE_ROOT/versions.kv"
+printf '# rdsh journal\n2026-09-29T00:00:00+08:00|init|9.9.7-rc.2|test\n' > "$STATE_ROOT/journal.log"
+printf '<!-- rdsh-generated —— 测试 -->\n# 回退基线\n' > "$BACKUP_ROOT/回退基线.md"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -93,34 +101,34 @@ has "$out" '软链' '报出软链条数'
 hasnt "$out" '没有任何对象是 baseline' '有 baseline 时不报"缺基线"（健康环境）'
 
 echo '--- 2) 断链（模拟 09-19 事故）→ 必须 error + 退出码 2 ---'
-ln -s "$B/dsh/ck-a/profiles/node_modules/@deepseek-ai/dsh-host-x" "$B/.dsh/9.9.7-rc.2/broken-plugin-link" 2>/dev/null || true
-mkdir -p "$B/.dsh/9.9.7-rc.2/profiles/node_modules/@deepseek-ai"
-ln -s "$B/nonexistent-target" "$B/.dsh/9.9.7-rc.2/profiles/node_modules/@deepseek-ai/dsh-host-x"
+ln -s "$MANAGE_ROOT/ck-a/profiles/node_modules/@deepseek-ai/dsh-host-x" "$DATA_ROOT/9.9.7-rc.2/broken-plugin-link" 2>/dev/null || true
+mkdir -p "$DATA_ROOT/9.9.7-rc.2/profiles/node_modules/@deepseek-ai"
+ln -s "$B/nonexistent-target" "$DATA_ROOT/9.9.7-rc.2/profiles/node_modules/@deepseek-ai/dsh-host-x"
 out="$(run 2>&1)"; rc=$?
 rc_is "$rc" 2 '有断链时退出码 2'
 has "$out" '断链' '报出断链'
 has "$out" '插件/依赖加载链' '点名插件/依赖加载链（09-19 那类）'
   has "$out" '按 home：' '断链按 home 分组报数（B12）'
   has "$out" '--fix-links' '给出修复命令（B12）'
-rm -f "$B/.dsh/9.9.7-rc.2/broken-plugin-link"
+rm -f "$DATA_ROOT/9.9.7-rc.2/broken-plugin-link"
 
 echo '--- 3) 账本缺 baseline / 回声不一致 → warn 或 info，不崩 ---'
-rm -f "$B/.dsh-suite/state/versions.kv"
+rm -f "$STATE_ROOT/versions.kv"
 out="$(run --only state 2>&1)"; rc=$?
 has "$out" '账本未播种' '账本不存在时明确提示'
 rc_is "$rc" 0 '账本未播种不算 error'
 {
   printf '# rdsh state —— 测试账本\n'
   printf '# 字段: key|version|role|role_set_at|installed_at|source|commit|built_at|migrated_from|baseline_for|dir|data|note\n'
-  printf '9.9.7-rc.2|9.9.7-rc.2|current||2026-09-01T00:00:00+08:00|local:x||2026-09-01T00:00:00+08:00|||%s|%s|\n' "$B/dsh/ck-a" "$B/.dsh/9.9.7-rc.2"
-} > "$B/.dsh-suite/state/versions.kv"
+  printf '9.9.7-rc.2|9.9.7-rc.2|current||2026-09-01T00:00:00+08:00|local:x||2026-09-01T00:00:00+08:00|||%s|%s|\n' "$MANAGE_ROOT/ck-a" "$DATA_ROOT/9.9.7-rc.2"
+} > "$STATE_ROOT/versions.kv"
 out="$(run --only state 2>&1)"
 has "$out" '没有 baseline' '缺 baseline 时会 warn'
 # 回声与账本不一致
-printf '# echo\nkey=9.9.7-rc.2\nrole=retired\n' > "$B/dsh/ck-a/.installed"
+printf '# echo\nkey=9.9.7-rc.2\nrole=retired\n' > "$MANAGE_ROOT/ck-a/.installed"
 out="$(run --only state 2>&1)"
 has "$out" '回声' '回声与账本不一致时提示'
-printf '# echo\nkey=9.9.7-rc.2\nrole=current\n' > "$B/dsh/ck-a/.installed"
+printf '# echo\nkey=9.9.7-rc.2\nrole=current\n' > "$MANAGE_ROOT/ck-a/.installed"
 
 echo '--- 4) 零检查必须报错 ---'
 out="$(run --only zzz 2>&1)"; rc=$?
@@ -128,7 +136,7 @@ rc_is "$rc" 2 '无维度可跑时退出码 2'
 has "$out" '检查对象总数为 0' '明确拒绝"零检查却报全绿"'
 
 echo '--- 5) --json ---'
-"$B/dsh/doctor.sh" --json --only entries > "$T/out.json" 2>/dev/null
+"$MANAGE_ROOT/doctor.sh" --json --only entries > "$T/out.json" 2>/dev/null
 rc=$?
 if python3 -c "import json,sys;d=json.load(open('$T/out.json'));assert d['checked']>0;assert 'dims' in d and 'findings' in d" 2>/dev/null; then
   ok '--json 输出可被 json.load 解析且 checked>0'

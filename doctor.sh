@@ -602,7 +602,17 @@ dim_logs() {
     N_OBJECTS=$((N_OBJECTS+1)); DIM_LINES+=("日志 0"); return
   fi
   local perm; perm="$(stat -c '%a' "$LOG_DIR" 2>/dev/null || echo '?')"
-  [ "$perm" != "700" ] && find_f warn logs "日志目录权限 $perm（含访问 token，惯例 700）"
+  # 权限松要紧的是"里面真有日志（=可能有访问 token）"；空目录 755 一点秘密都没有
+  # —— 原来无条件 warn，于是在隔离夹具（mkdir -p 建出来的 755 空 logs/）里必报假警，
+  #    冒烟"健康环境应 rc=0"因此恒挂。判据改成"有日志文件才算 warn"。
+  local nlog; nlog="$(ls -1 "$LOG_DIR"/web-*.log 2>/dev/null | grep -c . || true)"
+  if [ "$perm" != "700" ]; then
+    if [ "${nlog:-0}" -gt 0 ]; then
+      find_f warn logs "日志目录权限 $perm，且已有 $nlog 个日志文件（含访问 token，惯例 700）"
+    else
+      find_f info logs "日志目录权限 $perm（当前是空目录、尚无 token；惯例 700）"
+    fi
+  fi
   local f n=0 bad=0
   while IFS= read -r f; do
     [ -n "$f" ] || continue

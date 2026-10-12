@@ -30,6 +30,19 @@
 - **`rdsh-restart.sh` 的飞轮兜底静默失败**：投递 systemd 单元后不再"就当成功"，而是**判定结果**——失败就在重启日志里明说（附 journal 末行）、提示"在 Web 里手动继续"并**保留台账**。
 - **`plugin-prefs`/`reboot` 等旧文案里的死路径**（`~/Mapp/.dsh-logs` 等）与 `应急启动.md` 整篇重写：路径一律从 `BASE` 推导。
 
+### 新增（改根＝自动跟上，多根切换）
+
+- **`rdsh base <新根>` 默认＝自动跟上**：计划 → 确认（有 tty 才问；`--yes`/非交互直接执行）→ 建骨架 → **幂等**搬迁 11 个根 → 全盘按前缀重绑（软链 / `versions.kv` 的 dir·data / `.map` / 实例注册表 / `.installed` / 应急启动.md / `dsh*.desktop` / 入口链）→ 6 条资产链自愈 → 改配置（先备份）→ **自检** → 留**还原清单 + 还原脚本**（每次落 `<新state>/base-move-<ts>.md` + `.restore.sh`）。
+  动机（用户 2026-10-12）：「**有人可能拿 rdsh 管理多个根？旋钮要灵，需底层跟进**」「改根时自动跟上——这也是常见操作」。
+- **`rdsh base --set`**＝只改指向的老行为（**多根切换**用它，不搬东西）；**`rdsh base --json` / `--print-paths`**＝机器可读出口（13 个键 / `KEY=%q` 供 `eval`）——**本工具即唯一真源**，脚本/测试/插件不再各自写死布局。
+- **`rdsh base --residue <旧根>`**＝零残留扫描（活跃区 vs 归档区分开计数，只追加的历史流水不算活引用）；**`rdsh base --repoint <旧> <新>`**＝纯重绑。
+- 拒绝场景（宁可少做）：有逐项覆盖（`RDSH_*_ROOT` / 配置显式根）时**拒绝**自动搬迁，只能用 `--set`；新根已是另一个根时拒绝合并，只认同一旧根的 `.inprogress.md` 续跑标记。
+
+### 修复
+
+- **`doctor.sh` 日志权限判据**：原来无条件警告"日志目录权限非 700"，而**空目录 755 不含任何 token** —— 造成隔离夹具下"健康环境"恒报假警。现改为**有日志文件才 warn、空目录记 info**（负样本已验：755 + 1 个日志文件 → 仍 warn）。
+- **冒烟夹具改为"从工具推导"**：`tools/smoke-*.sh` 不再写死 `$BASE/dsh`、`$BASE/.dsh-*`，改为 `eval "$(rdsh base --print-paths)"` —— 布局约定再变，测试自动跟上（这正是本次 CI 变红的根因）。
+
 ### 变更（配套）
 
 - `plugins.d/session-archive.sh`：归档落点改 `$BASE/sessionsD/sessions`（与 `coldD` **并列**，同属冷数据）；`inject` 新建工作区条目改为**照真实注册表形状**写（`path/title/sessionIds/createdAt(ISO)/updatedAt(ISO)`，此前是 `createdAt:0` 且缺字段）。

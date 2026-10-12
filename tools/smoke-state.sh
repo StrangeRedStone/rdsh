@@ -35,17 +35,26 @@ T="$(mktemp -d)"; B="$T/base"
 cleanup() { rm -rf "$T"; }
 trap cleanup EXIT
 
-mkdir -p "$B/dsh" "$B/.dsh-backup"
+mkdir -p "$B/dsh"
 cp -p "$SRC" "$B/dsh/Rdsh.sh"
+
+# 夹具布局**从工具推导**（2026-10-12）：此前这里写死 "$B/dsh" + "$B/.dsh-*"，于是布局约定一改
+# 夹具就集体失配（CI 红）。现在一律问工具 —— 本工具即唯一真源，消费方不必知道布局细节。
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths)"
+# 只建**原夹具建过的那几样**（在推导出的真路径上）：state 目录**故意不建**——后面要验"不落盘"
+mkdir -p "$MANAGE_ROOT" "$BACKUP_ROOT"
 
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
           -u DSH_LOG_DIR -u DSH_WEB_PORT \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$MANAGE_ROOT/Rdsh.sh" "$@" </dev/null; }
 
 # 假检出：版本号刻意避开真机在跑的版本，防止 ss/proc 的宿主状态混进来
 mkck() { # <目录名> <版本> [git]
-  local d="$B/dsh/$1"; mkdir -p "$d"
+  local d="$MANAGE_ROOT/$1"; mkdir -p "$d"
   printf '{"name":"deepseek-harness","version":"%s"}\n' "$2" > "$d/package.json"
   printf x > "$d/.installed"; touch -d '2026-09-10 10:00:00' "$d/.installed"
   if [ "${3:-}" = git ]; then
@@ -56,7 +65,7 @@ mkck ck-a 9.9.7-rc.2  git
 mkck ck-b 9.9.6-beta.1 git
 mkck ck-c 9.9.5-alpha.1
 
-cat > "$B/.dsh-backup/回退基线.md" <<'EOF'
+cat > "$BACKUP_ROOT/回退基线.md" <<'EOF'
 # 回退基线（旧手写文件，用于验证 --init 的反向推断与留档）
 ## 20260925-194617 ｜ 9.9.6-beta.1 → 9.9.7-rc.2
 - 源 home：/tmp/x/data/9.9.6-beta.1
@@ -75,7 +84,7 @@ snap() { local f; for f in "$REAL/backup/回退基线.md" "$REAL/state/versions.
            [ -f "$f" ] && md5sum "$f"; done; }
 SNAP_BEFORE="$(snap)"
 
-SK="$B/.dsh-suite/state"
+SK="$STATE_ROOT"
 
 echo '--- 1) 空账本：只读，不建目录 ---'
 out="$(run state list 2>&1)"; rc=$?
@@ -98,19 +107,19 @@ out="$(run state --init 2>&1)"; rc=$?
 [ -f "$SK/versions.kv" ] && ok '账本 versions.kv 已建' || bad '账本缺失'
 [ -f "$SK/journal.log" ] && ok '流水 journal.log 已建' || bad '流水缺失'
 [ -f "$SK/回退基线-历史.md" ] && ok '旧手写基线已留档' || bad '旧手写基线未留档'
-[ -f "$B/.dsh-backup/回退基线.md" ] && ok '人读视图已生成' || bad '人读视图缺失'
-has "$(head -1 "$B/.dsh-backup/回退基线.md" 2>/dev/null)" 'rdsh-generated' '视图带生成标记'
+[ -f "$BACKUP_ROOT/回退基线.md" ] && ok '人读视图已生成' || bad '人读视图缺失'
+has "$(head -1 "$BACKUP_ROOT/回退基线.md" 2>/dev/null)" 'rdsh-generated' '视图带生成标记'
 has "$(cat "$SK/回退基线-历史.md" 2>/dev/null)" '旧手写文件' '留档保留了原文'
 [ "$(grep -c '^9\.9\.' "$SK/versions.kv")" = 3 ] && ok '账本登记 3 个对象' || bad "账本对象数=$(grep -c '^9\.9\.' "$SK/versions.kv")"
 has "$(cat "$SK/versions.kv")" 'baseline' '从旧基线推断出 baseline 角色'
 hasnt "$(cat "$SK/versions.kv")" '|current|' '无在跑实例可对应时不乱写 current'
-has "$(cat "$SK/versions.kv")" "$B/dsh/ck-a" '账本记下检出路径'
+has "$(cat "$SK/versions.kv")" "$MANAGE_ROOT/ck-a" '账本记下检出路径'
 
 echo '--- 4) .installed 回声 + .git/info/exclude ---'
-has "$(cat "$B/dsh/ck-a/.installed")" 'key=9.9.7-rc.2' '.installed 升级为 KEY=VALUE'
-has "$(cat "$B/dsh/ck-a/.installed")" 'role=installed' '.installed 带角色'
-has "$(cat "$B/dsh/ck-a/.installed")" 'state_journal_lines=' '.installed 带流水游标'
-case "$(cat "$B/dsh/ck-a/.git/info/exclude")" in
+has "$(cat "$MANAGE_ROOT/ck-a/.installed")" 'key=9.9.7-rc.2' '.installed 升级为 KEY=VALUE'
+has "$(cat "$MANAGE_ROOT/ck-a/.installed")" 'role=installed' '.installed 带角色'
+has "$(cat "$MANAGE_ROOT/ck-a/.installed")" 'state_journal_lines=' '.installed 带流水游标'
+case "$(cat "$MANAGE_ROOT/ck-a/.git/info/exclude")" in
   *'.installed'*) ok '.installed 已进 .git/info/exclude' ;;
   *) bad '.git/info/exclude 未加 .installed' ;;
 esac
@@ -118,7 +127,7 @@ esac
 echo '--- 5) list / state list / show 互通 ---'
 has "$(run list 2>&1)" 'installed' 'rdsh list 显示角色列'
 has "$(run state list 2>&1)" '9.9.7-rc.2' 'state list 列出对象'
-has "$(run state list 2>&1)" "$B/dsh/ck-b" 'state list 列出检出'
+has "$(run state list 2>&1)" "$MANAGE_ROOT/ck-b" 'state list 列出检出'
 out="$(run state show 9.9.6 2>&1)"
 has "$out" 'role' 'state show 按版本片段解析到对象'
 has "$out" 'baseline' 'state show 显示推断出的角色'
@@ -136,8 +145,8 @@ out="$(run state role 9.9.7-rc.2 乱写的角色 2>&1)"; rc=$?
 
 echo '--- 7) render 幂等 ---'
 run state render >/dev/null 2>&1
-has "$(head -1 "$B/.dsh-backup/回退基线.md")" 'rdsh-generated' '二次 render 仍带标记（未自我覆盖失败）'
-has "$(cat "$B/.dsh-backup/回退基线.md")" '迁移期历史' '视图带上留档了的历史'
+has "$(head -1 "$BACKUP_ROOT/回退基线.md")" 'rdsh-generated' '二次 render 仍带标记（未自我覆盖失败）'
+has "$(cat "$BACKUP_ROOT/回退基线.md")" '迁移期历史' '视图带上留档了的历史'
 
 echo '--- 8) record-migration（migrate.sh 的窄接口） ---'
 out="$(run state record-migration 9.9.6-beta.1 9.9.7-rc.2 --backup /x/bak --sessions all --probe '## 结论：✅ 未发现' 2>&1)"; rc=$?
@@ -153,7 +162,7 @@ r2="$(grep -c '|migrate|' "$SK/journal.log")"
 out="$(run state record-migration 9.9.9-nope 9.9.7-rc.2 2>&1)"; rc=$?
 [ "$rc" != 0 ] && ok '源不存在时 record-migration 失败' || bad '源不存在竟然成功'
 hasnt "$(cat "$SK/versions.kv")" '9.9.9-nope' '未把不存在的源写成幽灵行'
-has "$(cat "$B/.dsh-backup/回退基线.md")" 'migrate' '视图里能看到迁移事件'
+has "$(cat "$BACKUP_ROOT/回退基线.md")" 'migrate' '视图里能看到迁移事件'
 
 echo '--- 9) 真实资产未被触碰（逐字节） ---'
 SNAP_AFTER="$(snap)"
