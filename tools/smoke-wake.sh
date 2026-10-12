@@ -27,8 +27,15 @@ T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-suite/state" "$B/.dsh-suite/run/instances" "$B/.dsh-suite/logs"
 cp -p "$SRC" "$B/dsh/Rdsh.sh"
-[ -f "$(dirname "$SRC")/rdsh-restart.sh" ] && cp -p "$(dirname "$SRC")/rdsh-restart.sh" "$B/dsh/"
-D="$B/dsh/ck-1"; H="$B/.dsh/9.9.7-rc.2"
+# 夹具布局**从工具推导**（2026-10-12，同 smoke-state/doctor）：本工具即唯一真源，布局约定变了自己跟上
+[ -f "$B/dsh/Rdsh.sh" ] || cp -p "$(dirname "$(readlink -f "$SRC")")/Rdsh.sh" "$B/dsh/Rdsh.sh" 2>/dev/null || true
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths 2>/dev/null)"
+mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" 2>/dev/null || true
+[ -f "$(dirname "$SRC")/rdsh-restart.sh" ] && cp -p "$(dirname "$SRC")/rdsh-restart.sh" "$MANAGE_ROOT/"
+D="$MANAGE_ROOT/ck-1"; H="$DATA_ROOT/9.9.7-rc.2"
 mkdir -p "$D" "$H"; printf '{"name":"deepseek-harness","version":"9.9.7-rc.2"}\n' > "$D/package.json"
 
 # 注意：env 的 `-u` 选项必须排在**赋值之前**（GNU env 把选项后的第一个非赋值当命令，
@@ -37,7 +44,7 @@ run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT \
           -u RDSH_BACKUP_ROOT -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR -u RDSH_TRASH -u RDSH_MYDSH_REPO -u RDSH_PATCHES \
           RDSH_NO_LIVE_INSTANCES="${NO_LIVE:-0}" RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" \
-          bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
+          bash "$MANAGE_ROOT/Rdsh.sh" "$@" </dev/null; }
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -47,14 +54,19 @@ hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）" ; }
 
 # 真机台账目录指纹（硬断言：本测试绝不碰它）
-REAL_WAKE="$HOME/Mapp/.dsh-suite/data/0.1.7-rc.2/wake"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+# 版本号沿用原样：换目标版本时这行要跟着改（不是布局问题，是"盯哪个版本"的问题）
+REAL_WAKE="$REAL_ROOT/.dsh-suite/data/0.1.7-rc.2/wake"
 real_state() { find "$REAL_WAKE" -maxdepth 1 2>/dev/null | sort | tr '\n' ' '; }
 REAL_BEFORE="$(real_state)"
 
 echo '--- 0) 播种账本 + 指定 current（让"无目标"能走账本回退） ---'
 run state --init >/dev/null 2>&1
 run state role 9.9.7-rc.2 current >/dev/null 2>&1
-has "$(grep -v '^#' "$B/.dsh-suite/state/versions.kv")" '|current|' '账本里 9.9.7-rc.2 = current'
+has "$(grep -v '^#' "$STATE_ROOT/versions.kv")" '|current|' '账本里 9.9.7-rc.2 = current'
 
 echo '--- 1) wake add：JSON 合法、提示词含引号与换行也原样往返 ---'
 PROMPT=$'他说 "继续"；然后换行\n第二行'

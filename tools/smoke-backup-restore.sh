@@ -28,27 +28,43 @@ command -v rsync >/dev/null || { echo '本测试需要 rsync' >&2; exit 2; }
 
 T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-backup" "$B/.dsh-suite/state"
-printf '# 账本\n' > "$B/.dsh-suite/state/versions.kv"; printf '# 流水\n' > "$B/.dsh-suite/state/journal.log"
-cp -p "$SRC" "$B/dsh/Rdsh.sh"
+
+# 夹具布局**从工具推导**（2026-10-12，同 smoke-state/doctor）：本工具即唯一真源，布局约定变了自己跟上。
+# 旧夹具手搓 "$B/dsh"/"$B/.dsh"/"$B/.dsh-backup"/"$B/.dsh-suite/state" —— 布局收敛为
+# 「检出根 $BASE/rdsh + 数据/备份/共享/状态/插件统一在 $BASE/.dsh-suite/*」后集体失配（CI 红）。
+# 现在只做两件事：
+#   ① bootstrap：被测脚本必须先有一份能跑的副本，否则 MANAGE_ROOT 的"自定位回退"会指回真机仓库；
+#      放到工具自己的默认检出根 $BASE/rdsh（= `base --print-paths` 的 MANAGE_ROOT 默认值）。
+#   ② 其余 MANAGE/DATA/BACKUP/SHARED/STATE 等根一律 eval `base --print-paths` 拿，不再手写。
+mkdir -p "$B/rdsh"
+cp -p "$SRC" "$B/rdsh/Rdsh.sh"
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/rdsh/Rdsh.sh" base --print-paths 2>/dev/null)"
+# 只建原夹具建过的那几样（现在都落在推导出的真路径上）
+mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" "$STATE_ROOT" 2>/dev/null || true
+# 自愈：万一工具的默认检出根将来不叫 "rdsh"，按推导结果补一份，run() 才有脚本可跑
+[ -f "$MANAGE_ROOT/Rdsh.sh" ] || cp -p "$SRC" "$MANAGE_ROOT/Rdsh.sh"
+printf '# 账本\n' > "$STATE_ROOT/versions.kv"; printf '# 流水\n' > "$STATE_ROOT/journal.log"
 
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR -u RDSH_TRASH -u RDSH_MYDSH_REPO -u RDSH_PATCHES \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$MANAGE_ROOT/Rdsh.sh" "$@" </dev/null; }
 
 # 假检出 + 数据 home（含会话/凭据，测隐私规则）
-mkdir -p "$B/dsh/ck-a/node_modules" "$B/dsh/ck-a/.git/info"
-printf '{"name":"deepseek-harness","version":"9.9.7-rc.2"}\n' > "$B/dsh/ck-a/package.json"
-printf x > "$B/dsh/ck-a/.installed"
-D="$B/.dsh/9.9.7-rc.2"
+mkdir -p "$MANAGE_ROOT/ck-a/node_modules" "$MANAGE_ROOT/ck-a/.git/info"
+printf '{"name":"deepseek-harness","version":"9.9.7-rc.2"}\n' > "$MANAGE_ROOT/ck-a/package.json"
+printf x > "$MANAGE_ROOT/ck-a/.installed"
+D="$DATA_ROOT/9.9.7-rc.2"
 mkdir -p "$D/sessions" "$D/storages" "$D/profiles"
 printf 'session-1\n' > "$D/sessions/s1.json"
 printf 'big-payload\n' > "$D/storages/blob.bin"
 printf 'settings: 1\n' > "$D/settings.yaml"
 printf 'secret: TOPSECRET\n' > "$D/.credentials.yaml"
 printf 'workspace\n' > "$D/workspace.json"
-mkdir -p "$B/.dsh-shared"
+mkdir -p "$SHARED_ROOT"
 
 # 假「我的 dsh」本地克隆（用于 --type shared/plugins/config + --merge）
 M="$T/mydsh"
@@ -62,8 +78,8 @@ printf '# lessons\n\n## A 共享条目\n- 内容A\n\n## B 源独有条目\n- 内
 printf '# facts\n\n## F1\n- f\n' > "$M/shared/facts.md"
 printf '# backlog\n\n## K1\n- k\n' > "$M/shared/backlog.md"
 printf 'my-dsh AGENTS\n' > "$M/shared/AGENTS.md"
-printf '# lessons\n\n## A 共享条目\n- 内容A(本机版)\n\n## C 目标独有条目\n- 内容C\n' > "$B/.dsh-shared/lessons.md"
-printf 'local AGENTS\n' > "$B/.dsh-shared/AGENTS.md"
+printf '# lessons\n\n## A 共享条目\n- 内容A(本机版)\n\n## C 目标独有条目\n- 内容C\n' > "$SHARED_ROOT/lessons.md"
+printf 'local AGENTS\n' > "$SHARED_ROOT/AGENTS.md"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -72,7 +88,14 @@ has()  { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3（缺：$2）" ;; esac; }
 hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac; }
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）"; }
 
-REAL="$HOME/Mapp/.dsh-suite"
+# 真机守卫的"真实根"从**本机 rdsh 配置**推导（大部队统一口径，同 smoke-retire/numbering/…）：
+# 纯 KEY=VALUE 解析、不 source；前导空白容错、同名多行取末行；RDSH_CONFIG 可覆盖配置位置。
+# 旧写法 "$HOME/Mapp/.dsh-suite" 是上一代家规路径：本机 BASE=~/dsh，于是 find 全落空、断言空转也报 ok。
+# 干净 HOME（隔离冒烟）下读不到配置 → REAL_ROOT=$HOME/dsh（不存在）→ 本断言仍是 no-op。
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"
+REAL="$REAL_ROOT/.dsh-suite"
 snap_real() { find "$REAL/backup/snapshots" "$REAL/backup/state-snapshots" "$REAL/trash" -maxdepth 1 2>/dev/null | sort; }
 REAL_BEFORE="$(snap_real)"
 
@@ -81,7 +104,7 @@ out="$(run backup 9.9.7-rc.2 --snapshot --verify 2>&1)"; rc=$?
 rc_is "$rc" 0 'backup --snapshot --verify 退出码 0'
 has "$out" '快照完成' '打印快照完成'
 has "$out" '[ok]' '逐文件核查通过'
-SNAP1="$(ls -1dt "$B/.dsh-backup/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | sed -n '1p')"
+SNAP1="$(ls -1dt "$BACKUP_ROOT/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | sed -n '1p')"
 [ -f "$SNAP1/MANIFEST.kv" ] && ok '快照带 MANIFEST.kv' || bad '缺 MANIFEST.kv'
 has "$(cat "$SNAP1/MANIFEST.kv")" 'mode=snapshot' 'MANIFEST 记模式'
 has "$(cat "$SNAP1/MANIFEST.kv")" 'version=9.9.7-rc.2' 'MANIFEST 记版本'
@@ -92,7 +115,7 @@ printf 'changed\n' > "$D/storages/blob.bin"
 printf 'new-file\n' > "$D/sessions/s2.json"
 sleep 1
 run backup 9.9.7-rc.2 --snapshot >/dev/null 2>&1
-SNAP2="$(ls -1dt "$B/.dsh-backup/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | sed -n '1p')"
+SNAP2="$(ls -1dt "$BACKUP_ROOT/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | sed -n '1p')"
 [ "$SNAP1" != "$SNAP2" ] && ok '生成了第二份快照' || bad '第二份快照没生成'
 has "$(cat "$SNAP2/MANIFEST.kv")" "link_dest=$SNAP1" 'MANIFEST 记下硬链接基准'
 i1="$(stat -c %i "$SNAP1/settings.yaml" 2>/dev/null)"; i2="$(stat -c %i "$SNAP2/settings.yaml" 2>/dev/null)"
@@ -101,7 +124,7 @@ i1="$(stat -c %i "$SNAP1/settings.yaml" 2>/dev/null)"; i2="$(stat -c %i "$SNAP2/
 # 注意：du 对硬链接在**同一次遍历**里只算一次，所以单看 SNAP2 的 du 会等于其"表观大小"。
 # 真正的共享证据：两份快照合计的实际占用 < 各自表观大小之和。
 b1="$(du -sk "$SNAP1" | cut -f1)"; b2="$(du -sk "$SNAP2" | cut -f1)"
-tot="$(du -sk "$B/.dsh-backup/snapshots/9.9.7-rc.2" | cut -f1)"
+tot="$(du -sk "$BACKUP_ROOT/snapshots/9.9.7-rc.2" | cut -f1)"
 [ "$tot" -lt "$((b1 + b2))" ] && ok "两份合计占用 $tot KB < 各自之和 $((b1 + b2)) KB（硬链接省了空间）" \
   || bad "没有省空间（合计 $tot KB，两份表观和 $((b1 + b2)) KB）"
 
@@ -119,20 +142,20 @@ rc_is "$rc" 0 '未被改动的快照核查通过'
 
 echo '--- 4) --keep 1：超出的快照进回收站（不 rm） ---'
 run backup 9.9.7-rc.2 --snapshot --keep 1 >/dev/null 2>&1
-LEFT="$(ls -1d "$B/.dsh-backup/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | wc -l)"
+LEFT="$(ls -1d "$BACKUP_ROOT/snapshots/9.9.7-rc.2"/*/ 2>/dev/null | wc -l)"
 [ "$LEFT" = "1" ] && ok '只剩 1 份快照' || bad "还剩 $LEFT 份"
-TMOVED="$(ls -1d "$B/.dsh-suite/trash"/*/ 2>/dev/null | wc -l)"
+TMOVED="$(ls -1d "$TRASH_ROOT"/*/ 2>/dev/null | wc -l)"
 [ "$TMOVED" -ge 1 ] && ok "被裁掉的快照进了回收站（$TMOVED 个条目）" || bad '裁掉的快照没进回收站'
-TRASH_DUMP="$(cat "$B/.dsh-suite/trash"/*/.rdsh-trash.kv 2>/dev/null)"
+TRASH_DUMP="$(cat "$TRASH_ROOT"/*/.rdsh-trash.kv 2>/dev/null)"
 has "$TRASH_DUMP" 'orig.1=' '回收条目带原路径'
 
 echo '--- 5) state 快照 ---'
 run backup --state >/dev/null 2>&1
-[ -d "$B/.dsh-backup/state-snapshots" ] && [ "$(ls -1d "$B/.dsh-backup/state-snapshots"/*/ 2>/dev/null | wc -l)" -ge 1 ] \
+[ -d "$BACKUP_ROOT/state-snapshots" ] && [ "$(ls -1d "$BACKUP_ROOT/state-snapshots"/*/ 2>/dev/null | wc -l)" -ge 1 ] \
   && ok '状态账本快照已生成' || bad '状态账本快照没生成'
 
 echo '--- 6) restore --diff 与无 --yes 都不落盘 ---'
-SNAPL="$(ls -1dt "$B/.dsh-backup/snapshots/9.9.7-rc.2"/*/ | sed -n '1p')"
+SNAPL="$(ls -1dt "$BACKUP_ROOT/snapshots/9.9.7-rc.2"/*/ | sed -n '1p')"
 printf 'user-wrote-this\n' > "$D/workspace.json"
 before="$(cat "$D/workspace.json")"
 out="$(run restore --type data 9.9.7-rc.2 --diff 2>&1)"; rc=$?
@@ -151,7 +174,7 @@ has "$out" '已恢复' '打印已恢复'
 [ ! -e "$D/.credentials.yaml" ] && ok '凭据默认**没有**恢复（隐私）' || bad '凭据被恢复了'
 out="$(run restore --type data 9.9.7-rc.2 --yes --with-creds --no-doctor 2>&1)"
 [ -e "$D/.credentials.yaml" ] && ok '--with-creds 时凭据一并恢复' || bad '--with-creds 没恢复凭据'
-has "$(cat "$B/.dsh-suite/trash"/*/.rdsh-trash.kv 2>/dev/null)" 'restore-data' '覆盖前的既有数据进了回收站'
+has "$(cat "$TRASH_ROOT"/*/.rdsh-trash.kv 2>/dev/null)" 'restore-data' '覆盖前的既有数据进了回收站'
 
 echo '--- 8) 远端源 + data/state：一律拒绝 ---'
 out="$(run restore --type data 9.9.7-rc.2 --from git:https://example.invalid/x.git 2>&1)"; rc=$?
@@ -163,17 +186,17 @@ out="$(run restore --type state --from https://example.invalid/x.git 2>&1)"; rc=
 echo '--- 9) --merge：记忆三库按条目追加（目标独有条目必须活着） ---'
 out="$(run restore --type shared --from "$M" --merge --yes --no-doctor 2>&1)"; rc=$?
 rc_is "$rc" 0 'shared --merge 退出码 0'
-L="$B/.dsh-shared/lessons.md"
+L="$SHARED_ROOT/lessons.md"
 has "$(cat "$L")" '## B 源独有条目' '源里的新条已被追加'
 has "$(cat "$L")" '## C 目标独有条目' '目标独有的条**没有**被抹掉（append-only）'
 has "$(cat "$L")" '## A 共享条目' '共有条目还在'
 hasnt "$(cat "$L")" '## B 源独有条目\n\n## B 源独有条目' '没有重复追加同一条'
-[ "$(cat "$B/.dsh-shared/AGENTS.md")" = 'my-dsh AGENTS' ] && ok '非记忆文件按覆盖语义恢复' || bad 'AGENTS.md 未按源恢复'
-[ -f "$B/.dsh-shared/lessons.md.old-copy" ] && ok '覆盖前的旧文件留了副本（可对照）' || bad '没留旧副本'
+[ "$(cat "$SHARED_ROOT/AGENTS.md")" = 'my-dsh AGENTS' ] && ok '非记忆文件按覆盖语义恢复' || bad 'AGENTS.md 未按源恢复'
+[ -f "$SHARED_ROOT/lessons.md.old-copy" ] && ok '覆盖前的旧文件留了副本（可对照）' || bad '没留旧副本'
 
 echo '--- 10) 插件/配置类型 ---'
 run restore --type plugins --from "$M" --yes --no-doctor >/dev/null 2>&1
-[ -f "$B/dsh-plugins/alpha/index.js" ] && ok '插件权威副本已恢复' || bad '插件没恢复'
+[ -f "$PLUGIN_ROOT/alpha/index.js" ] && ok '插件权威副本已恢复' || bad '插件没恢复'
 run restore --type config --from "$M" --yes --no-doctor >/dev/null 2>&1
 [ -f "$B/rdsh-config" ] && ok '配置文件已恢复（文件类目标）' || bad '配置文件没恢复'
 

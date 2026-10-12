@@ -36,7 +36,11 @@ hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）" ; }
 
 # 真机入口指纹（测试前后必须一致）
-REAL_LINK="$HOME/.local/bin/rdsh"; REAL_LINK2="$HOME/Mapp/dsh/rdsh"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL_LINK="$HOME/.local/bin/rdsh"; REAL_LINK2="$REAL_ROOT/rdsh/rdsh"
 REAL_DESK="$HOME/.local/share/applications/dsh.desktop"
 real_state() {
   printf 'l1=%s|' "$([ -L "$REAL_LINK" ] && readlink "$REAL_LINK" || { [ -e "$REAL_LINK" ] && echo FILE || echo none; })"

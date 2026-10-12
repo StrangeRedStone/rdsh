@@ -35,6 +35,21 @@ PASS=0; FAIL=0
 REAL_LINK="$HOME/.local/bin/rdsh"
 real_link_state() { if [ -L "$REAL_LINK" ]; then printf 'L:%s' "$(readlink "$REAL_LINK")"; elif [ -e "$REAL_LINK" ]; then printf 'F'; else printf 'none'; fi; }
 REAL_LINK_BEFORE="$(real_link_state)"
+# 真机 BASE → 检出/备份根：从真机配置**推导**，绝不写死（旧写法 `$HOME/Mapp/dsh` 早就不是真机布局：
+# 2026-10-11 起真机 BASE=~/dsh，检出 $BASE/rdsh、备份 $BASE/.dsh-suite/backup，写死的断言于是空转）。
+# 没有配置 / 对应路径不存在时，第 10 段的相应断言自动跳过（打印"跳过"，不计失败）。
+REAL_CFG="$HOME/.config/rdsh/config"
+REAL_BASE="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$REAL_CFG" 2>/dev/null | tail -1)"
+case "$REAL_BASE" in
+  "~")   REAL_BASE="$HOME" ;;
+  "~/"*) REAL_BASE="$HOME/${REAL_BASE#\~/}" ;;
+esac
+REAL_RD=""; REAL_BK_ROOT=""
+if [ -n "$REAL_BASE" ]; then REAL_RD="$REAL_BASE/rdsh/Rdsh.sh"; REAL_BK_ROOT="$REAL_BASE/.dsh-suite/backup"; fi
+md5_or_none() { [ -f "$1" ] && md5sum "$1" 2>/dev/null | cut -c1-8 || printf 'none'; }
+real_bk_count() { [ -n "$1" ] && ls -1d "$1"/dsh-scripts-*/ 2>/dev/null | wc -l || printf '0'; }
+REAL_RD_BEFORE="$(md5_or_none "${REAL_RD:-/nonexistent}")"
+REAL_BK_BEFORE="$(real_bk_count "$REAL_BK_ROOT")"
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
 has()  { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3（缺：$2）" ;; esac; }
@@ -42,6 +57,8 @@ hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）"; }
 
 B1="$T/base1"; BIND="$T/bin"        # BIN_DIR 必须隔离：默认是 $HOME/.local/bin（真机！）
+# 检出目录名：bootstrap.sh:86 的默认检出位置是 `$BASE/rdsh`（经典 `$BASE/dsh` 只是回退），
+# 下面所有断言必须跟着它走，否则脚本装到 rdsh/、断言盯着 dsh/ —— 全盘假失败。
 BOOT=(bash "$SRC/bootstrap.sh" --base "$B1" --config "$B1/rdsh.config" --from "$SRC2" --bin-dir "$BIND")
 SNAP() { find "$B1" -maxdepth 3 2>/dev/null | sort; }
 
@@ -58,16 +75,16 @@ has "$D" 'dry-run：只打印计划' '明确标注是预演'
 echo '--- 2) 真装：脚本/配置/入口/日志/验收 ---'
 "${BOOT[@]}" > "$T/run1.log" 2>&1; rc=$?
 rc_is "$rc" 0 '真装 rc=0'
-[ -f "$B1/dsh/Rdsh.sh" ] && ok 'Rdsh.sh 到位' || bad 'Rdsh.sh 没到位'
-[ -f "$B1/dsh/doctor.sh" ] && ok 'doctor.sh 到位' || bad 'doctor.sh 没到位'
+[ -f "$B1/rdsh/Rdsh.sh" ] && ok 'Rdsh.sh 到位' || bad 'Rdsh.sh 没到位'
+[ -f "$B1/rdsh/doctor.sh" ] && ok 'doctor.sh 到位' || bad 'doctor.sh 没到位'
 [ -f "$B1/rdsh.config" ] && ok '配置文件已生成' || bad '配置文件没生成'
 CFG1="$(cat "$B1/rdsh.config")"
 has "$CFG1" "BASE=$B1" '配置里写了 BASE'
 has "$CFG1" "BACKUP_ROOT=$B1/.dsh-suite/backup" '配置写出 suite 布局（BACKUP_ROOT）'
 has "$CFG1" "DATA_ROOT=$B1/.dsh-suite/data" '配置写出 suite 布局（DATA_ROOT）'
 [ -d "$B1/.dsh-suite/backup" ] && ok '建的目录与配置指向一致' || bad '目录与配置不一致'
-[ -L "$B1/dsh/rdsh" ] && ok '<检出>/rdsh 入口软链已建' || bad '入口软链没建'
-[ -x "$B1/dsh/Rdsh.sh" ] && ok 'Rdsh.sh 可执行' || bad 'Rdsh.sh 不可执行'
+[ -L "$B1/rdsh/rdsh" ] && ok '<检出>/rdsh 入口软链已建' || bad '入口软链没建'
+[ -x "$B1/rdsh/Rdsh.sh" ] && ok 'Rdsh.sh 可执行' || bad 'Rdsh.sh 不可执行'
 [ -n "$(ls -1 "$B1/.dsh-suite/logs"/bootstrap-*.log 2>/dev/null)" ] && ok '日志已落盘' || bad '日志没落盘'
 L="$(cat "$T/run1.log")"
 has "$L" '7/7 验收' '跑了验收段'
@@ -110,7 +127,7 @@ has "$out" 'jq' '点名缺的是 jq'
 has "$out" 'install' '给出了安装提示'
 
 echo '--- 6) selfupdate：装新副本 + 留回滚点 ---'
-B1RD="$B1/dsh"          # bootstrap 默认检出位置 = $BASE/dsh
+B1RD="$B1/rdsh"          # bootstrap 默认检出位置 = $BASE/rdsh（bootstrap.sh:86）
 # 造"新版本"：在 Rdsh.sh 里加一行标记
 SRC3="$T/src3"; cp -a "$SRC2" "$SRC3"
 printf '\n# SELFUPDATE-SMOKE-MARKER-v2\n' >> "$SRC3/Rdsh.sh"
@@ -157,14 +174,22 @@ has "$out" '不动它' '明确说不动它'
 [ "$(readlink "$BINF/rdsh")" = "/some/other/place" ] && ok '外部软链没有被覆盖' || bad '外部软链被覆盖了！'
 out="$(bash "$SRC/bootstrap.sh" --base "$BF" --config "$BF/c" --from "$SRC2" --bin-dir "$BINF" --force 2>&1)"; rc=$?
 rc_is "$rc" 0 '--force 时才替换'
-[ "$(readlink "$BINF/rdsh")" = "$BF/dsh/rdsh" ] && ok '--force 后指向本检出' || bad '--force 没有生效'
+[ "$(readlink "$BINF/rdsh")" = "$BF/rdsh/rdsh" ] && ok '--force 后指向本检出' || bad '--force 没有生效'
 
 echo '--- 10) 真机未被触碰 ---'
 [ "$REAL_LINK_BEFORE" = "$(real_link_state)" ] && ok "真机 $REAL_LINK 状态未变（$REAL_LINK_BEFORE）" || bad "真机入口被改了：$REAL_LINK_BEFORE → $(real_link_state)"
-REAL_MD5="$(md5sum "$HOME/Mapp/dsh/Rdsh.sh" | cut -c1-8)"
-[ "$REAL_MD5" = "$(md5sum "$HOME/Mapp/dsh/Rdsh.sh" | cut -c1-8)" ] && ok '真机 Rdsh.sh md5 未变' || bad '真机 Rdsh.sh 被改了'
-N_REAL_BK="$(ls -1d "$HOME/Mapp/.dsh-suite/backup"/dsh-scripts-*/ 2>/dev/null | wc -l)"
-[ "$N_REAL_BK" -ge 0 ] && ok "真机备份根未新增回滚点（当前 $N_REAL_BK 个）" || bad '真机备份根异常'
+if [ -n "$REAL_RD" ] && [ -f "$REAL_RD" ]; then
+  REAL_MD5_AFTER="$(md5_or_none "$REAL_RD")"
+  [ "$REAL_RD_BEFORE" = "$REAL_MD5_AFTER" ] && ok "真机 Rdsh.sh md5 未变（$REAL_RD：$REAL_MD5_AFTER）" || bad "真机 Rdsh.sh 被改了：$REAL_RD $REAL_RD_BEFORE → $REAL_MD5_AFTER"
+else
+  ok "真机 Rdsh.sh 不存在（${REAL_RD:-未推导出 BASE}）→ 跳过 md5 断言"
+fi
+if [ -n "$REAL_BK_ROOT" ] && [ -d "$REAL_BK_ROOT" ]; then
+  N_REAL_BK="$(real_bk_count "$REAL_BK_ROOT")"
+  [ "$N_REAL_BK" -eq "$REAL_BK_BEFORE" ] && ok "真机备份根未新增回滚点（$REAL_BK_ROOT：$REAL_BK_BEFORE → $N_REAL_BK）" || bad "真机备份根新增了回滚点：$REAL_BK_BEFORE → $N_REAL_BK"
+else
+  ok "真机备份根不存在（${REAL_BK_ROOT:-未推导出 BASE}）→ 跳过回滚点断言"
+fi
 
 echo
 printf '结果：%s 通过，%s 失败\n' "$PASS" "$FAIL"

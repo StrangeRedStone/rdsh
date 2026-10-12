@@ -52,7 +52,14 @@ bad()  { FAIL=$((FAIL+1)); printf '  FAIL %s\n' "$1"; }
 has()  { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3（缺：$2）" ;; esac; }
 rc_in(){ case " $2 " in *" $1 "*) ok "$3" ;; *) bad "$3（期望 rc∈{$2}，实际 $1）" ;; esac; }
 
-REAL="$HOME/Mapp/.dsh-suite"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL="$REAL_ROOT/.dsh-suite"
+REAL_CFG="$_rc"                          # 用户配置路径（第 8 节要显式把它交给真机脚本）
+# 真机检出根（第 8 节的 restart --dry-run 要跑**真机**那份脚本）：BASE 下检出目录名由工具说了算
+REAL_RD="${RDSH_MANAGE_ROOT:-$REAL_ROOT/rdsh}/Rdsh.sh"
 REAL_BEFORE="$(find "$REAL/state" "$REAL/trash" -maxdepth 1 2>/dev/null | sort)"
 
 echo '--- 1) 契约是合法 JSON 且字段齐全 ---'
@@ -145,18 +152,23 @@ has "$TXT" '风险等级' '人类可读版说明了风险等级与默认参数�
 
 echo '--- 8) 真机 restart --dry-run：在跑的实例 PID 必须不变 ---'
 # 这一节说的是**真机**：干净 HOME（CI / 新机器）下真机路径不存在 → 明确跳过，不算失败
-if [ ! -f "$HOME/Mapp/dsh/Rdsh.sh" ]; then
-  echo '  --   跳过（本 HOME 下没有 $HOME/Mapp/dsh/Rdsh.sh —— CI/干净环境属正常）'
+if [ ! -f "$REAL_RD" ]; then
+  echo "  --   跳过（本 HOME 下没有真机脚本 $REAL_RD —— CI/干净环境属正常）"
   pid3080() { :; }
 else
 pid3080() { ss -ltnp 2>/dev/null | grep -F ':3080' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2; }
 P0="$(pid3080)"
 if [ -n "$P0" ]; then
-  # 这条断言说的是**真机**，所以必须清掉被注入的 RDSH_BASE/RDSH_CONFIG 再跑
-  # （否则真机脚本会去临时 BASE 里找实例，找不到就早退，日志里自然没有那句"未做任何改动"）
-  env -u RDSH_BASE -u RDSH_CONFIG -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+  # 这条断言说的是**真机**，所以要把被注入的 RDSH_BASE 等清掉再跑，并**显式**把用户配置交给真机脚本：
+  # 嵌套跑时（selfupdate 的校验 3/3 会跑本冒烟）环境里带着临时 RDSH_CONFIG，而 rdsh-restart.sh 是
+  # **按配置里的 BASE 重新解析一遍**的 —— 只清掉不够，它会去隔离 BASE 里找实例、找不到就早退，
+  # 日志里自然没有那句"未做任何改动"（2026-10-12 实测：嵌套冒烟必挂 → 外层 selfupdate 两条断言连坐）。
+  # ⚠️ `env` 的 `-u` 必须都在**变量赋值之前**：写成 `env -u A VAR=x -u B cmd` 时 GNU env 会把 `-u` 当成命令名
+  #    （实测报 `env: "-u": 没有那个文件或目录`，rc=127，而且被 `>/dev/null` 吞得无影无踪）。
+  env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
       -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_TRASH -u DSH_LOG_DIR \
-      bash "$HOME/Mapp/dsh/Rdsh.sh" restart --dry-run --log "$T/restart-dry.log" >/dev/null 2>&1
+      ${RDSH_CONFIG+"RDSH_CONFIG=$REAL_CFG"} \
+      bash "$REAL_RD" restart --dry-run --log "$T/restart-dry.log" >/dev/null 2>&1
   P1="$(pid3080)"
   [ "$P0" = "$P1" ] && ok "restart --dry-run 没动在跑的实例（PID $P0 不变）" || bad "dry-run 竟然动了实例：$P0 → $P1"
   has "$(cat "$T/restart-dry.log" 2>/dev/null)" '未做任何改动' '日志里明确写了"未做任何改动"'

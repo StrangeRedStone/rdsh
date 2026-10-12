@@ -29,26 +29,33 @@ T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-backup" "$B/.dsh-suite/state"
 cp -p "$SRC" "$B/dsh/Rdsh.sh"
+# 夹具布局**从工具推导**（2026-10-12，同 smoke-state/doctor）：本工具即唯一真源，布局约定变了自己跟上
+[ -f "$B/dsh/Rdsh.sh" ] || cp -p "$(dirname "$(readlink -f "$SRC")")/Rdsh.sh" "$B/dsh/Rdsh.sh" 2>/dev/null || true
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths 2>/dev/null)"
+mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" 2>/dev/null || true
 printf '# 账本\n# 字段: key|version|role|role_set_at|installed_at|source|commit|built_at|migrated_from|baseline_for|dir|data|note|settings|settings_sha\n' \
-  > "$B/.dsh-suite/state/versions.kv"
-printf '# journal\n' > "$B/.dsh-suite/state/journal.log"
+  > "$STATE_ROOT/versions.kv"
+printf '# journal\n' > "$STATE_ROOT/journal.log"
 
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR -u RDSH_TRASH -u RDSH_MYDSH_REPO -u RDSH_PATCHES \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$MANAGE_ROOT/Rdsh.sh" "$@" </dev/null; }
 
 mkck() { # <目录名> <版本>
-  local d="$B/dsh/$1" h="$B/.dsh/$2"
-  mkdir -p "$d/node_modules" "$B/.dsh/$2"
+  local d="$MANAGE_ROOT/$1" h="$DATA_ROOT/$2"
+  mkdir -p "$d/node_modules" "$DATA_ROOT/$2"
   printf '{"name":"deepseek-harness","version":"%s"}\n' "$2" > "$d/package.json"
   printf x > "$d/.installed"
 }
 mkck ck-old 9.9.7-rc.2
 mkck ck-new 9.9.6-beta.1
 
-OLD="$B/.dsh/9.9.7-rc.2/settings.yaml"
-NEW="$B/.dsh/9.9.6-beta.1/settings.yaml"
+OLD="$DATA_ROOT/9.9.7-rc.2/settings.yaml"
+NEW="$DATA_ROOT/9.9.6-beta.1/settings.yaml"
 cat > "$OLD" <<'EOF'
 # 老版本的 settings
 ui:
@@ -75,13 +82,17 @@ has()  { case "$1" in *"$2"*) ok "$3" ;; *) bad "$3（缺：$2）" ;; esac; }
 hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac; }
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）" ; }
 
-REAL="$HOME/Mapp/.dsh-suite/data"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL="$REAL_ROOT/.dsh-suite/data"
 REAL_BEFORE="$(sha256sum "$REAL"/*/settings.yaml 2>/dev/null || true)"
 
 echo '--- 1) 播种时登记 settings（路径 + sha） ---'
 out="$(run state --init 2>&1)"; rc=$?
 rc_is "$rc" 0 'state --init rc=0'
-KV="$(cat "$B/.dsh-suite/state/versions.kv")"
+KV="$(cat "$STATE_ROOT/versions.kv")"
 has "$KV" "$OLD" '账本记下旧版本的 settings 路径'
 has "$KV" "$OLD_SHA" '账本记下旧版本 settings 的 sha'
 has "$KV" "$NEW_SHA" '账本记下新版本 settings 的 sha'
@@ -118,7 +129,7 @@ fi
 
 echo '--- 5) 账本指纹更新；文件被改后报"与账本不符" ---'
 NEW_SHA2="$(sha256sum "$NEW" | cut -c1-8)"
-has "$(cat "$B/.dsh-suite/state/versions.kv")" "$NEW_SHA2" '账本指纹已刷新为携带后的值'
+has "$(cat "$STATE_ROOT/versions.kv")" "$NEW_SHA2" '账本指纹已刷新为携带后的值'
 out="$(run settings show 9.9.6-beta.1 2>&1)"
 has "$out" '与账本一致' '改前：与账本一致'
 printf '\n手改了一行\n' >> "$NEW"

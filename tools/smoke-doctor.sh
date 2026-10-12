@@ -84,7 +84,11 @@ hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）"; }
 
 # 真机 state 资产快照（跑测全程必须不变）
-REAL="$HOME/Mapp/.dsh-suite"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL="$REAL_ROOT/.dsh-suite"
 snap_real() { local f; for f in "$REAL/backup/回退基线.md" "$REAL/state/versions.kv" "$REAL/state/journal.log"; do
                 [ -f "$f" ] && md5sum "$f"; done; }
 # 临时 BASE 内容快照（doctor 只读 → 必须一致）

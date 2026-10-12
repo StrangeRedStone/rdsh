@@ -66,7 +66,12 @@ hasnt(){ case "$1" in *"$2"*) bad "$3（不该有：$2）" ;; *) ok "$3" ;; esac
 rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）"; }
 
 TR="$B/.dsh-suite/trash"
-REAL_TRASH="$HOME/Mapp/.dsh-suite/trash"; REAL_BACKUP="$HOME/Mapp/.dsh-suite/backup"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL="$REAL_ROOT/.dsh-suite"
+REAL_TRASH="$REAL/trash"; REAL_BACKUP="$REAL/backup"
 snap_real() { find "$REAL_TRASH" "$REAL_BACKUP" -maxdepth 1 2>/dev/null | sort | while IFS= read -r f; do
                 printf '%s %s\n' "$f" "$(stat -c '%s %Y' "$f" 2>/dev/null)"; done; }
 REAL_BEFORE="$(snap_real)"

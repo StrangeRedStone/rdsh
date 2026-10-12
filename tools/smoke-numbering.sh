@@ -26,15 +26,22 @@ T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-backup" "$B/.dsh-suite/state" "$B/.dsh-suite/run/instances"
 cp -p "$SRC" "$B/dsh/Rdsh.sh"
-[ -f "$(dirname "$SRC")/doctor.sh" ] && cp -p "$(dirname "$SRC")/doctor.sh" "$B/dsh/doctor.sh"
+# 夹具布局**从工具推导**（2026-10-12，同 smoke-state/doctor）：本工具即唯一真源，布局约定变了自己跟上
+[ -f "$B/dsh/Rdsh.sh" ] || cp -p "$(dirname "$(readlink -f "$SRC")")/Rdsh.sh" "$B/dsh/Rdsh.sh" 2>/dev/null || true
+eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
+        -u RDSH_SHARED_HOME -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT -u RDSH_STATE_ROOT \
+        -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT \
+        RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths 2>/dev/null)"
+mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" 2>/dev/null || true
+[ -f "$(dirname "$SRC")/doctor.sh" ] && cp -p "$(dirname "$SRC")/doctor.sh" "$MANAGE_ROOT/doctor.sh"
 
 run() { env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_ROOT \
           -u RDSH_SHARED_HOME -u RDSH_STATE_ROOT -u RDSH_RUN_DIR -u RDSH_DEBUG_ROOT \
           -u RDSH_PLUGIN_ROOT -u DSH_LOG_DIR -u RDSH_TRASH -u RDSH_MYDSH_REPO -u RDSH_PATCHES \
-          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" "$@" </dev/null; }
+          RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$MANAGE_ROOT/Rdsh.sh" "$@" </dev/null; }
 
 mkck() { # <目录名> <版本>
-  local d="$B/dsh/$1"
+  local d="$MANAGE_ROOT/$1"
   mkdir -p "$d/node_modules" "$d/.git/info"
   printf '{"name":"deepseek-harness","version":"%s"}\n' "$2" > "$d/package.json"
   printf x > "$d/.installed"; printf 'objects\n.installed\n' > "$d/.git/info/exclude"
@@ -42,8 +49,8 @@ mkck() { # <目录名> <版本>
 mkck ck-1 9.9.7-rc.2
 mkck ck-2 9.9.7-rc.2              # 同版本第二份（目录名不带次号 —— 最容易撞车的形态）
 printf '# 账本\n# 字段: key|version|role|role_set_at|installed_at|source|commit|built_at|migrated_from|baseline_for|dir|data|note\n' \
-  > "$B/.dsh-suite/state/versions.kv"
-printf '# journal\n' > "$B/.dsh-suite/state/journal.log"
+  > "$STATE_ROOT/versions.kv"
+printf '# journal\n' > "$STATE_ROOT/journal.log"
 
 PASS=0; FAIL=0
 ok()   { PASS=$((PASS+1)); printf '  ok   %s\n' "$1"; }
@@ -55,15 +62,15 @@ rc_is(){ [ "$1" = "$2" ] && ok "$3" || bad "$3（期望 rc=$2，实际 $1）"; }
 echo '--- 1) 两份同版本：先登记的拿版本号，后一份拿 -2（state --init 扫重） ---'
 out="$(run state --init 2>&1)"; rc=$?
 rc_is "$rc" 0 'state --init rc=0'
-KV="$(cat "$B/.dsh-suite/state/versions.kv")"
+KV="$(cat "$STATE_ROOT/versions.kv")"
 has "$KV" '9.9.7-rc.2|9.9.7-rc.2|' '第一份的键 = 版本号'
 has "$KV" '9.9.7-rc.2-2' '第二份拿到了 -2 次号'
 has "$out" '同版本第二份检出' '明确提示这是同版本第二份'
 has "$out" '数据 home' '提示数据 home 已分开'
 
 echo '--- 2) 数据 home 必须分开（并写进 .map） ---'
-has "$(cat "$B/dsh/.map" 2>/dev/null)" 'dir|ck-2|' 'ck-2 的数据目录映射已写入 .map'
-D1="$B/.dsh/9.9.7-rc.2"; D2="$B/.dsh/9.9.7-rc.2-2"
+has "$(cat "$MANAGE_ROOT/.map" 2>/dev/null)" 'dir|ck-2|' 'ck-2 的数据目录映射已写入 .map'
+D1="$DATA_ROOT/9.9.7-rc.2"; D2="$DATA_ROOT/9.9.7-rc.2-2"
 has "$(run list 2>&1)" '9.9.7-rc.2-2' 'list 显示次号'
 out="$(run list 2>&1)"
 has "$out" "$D2" 'list 里第二份的数据目录是 <键>'
@@ -87,8 +94,8 @@ has "$out" '次号点名' '报错里告诉怎么点名'
 echo '--- 4) 身份不变、不压缩、不重用 ---'
 run backup 9.9.7-rc.2-2 --snapshot >/dev/null 2>&1
 run retire 9.9.7-rc.2-2 --apply >/dev/null 2>&1
-has "$(cat "$B/.dsh-suite/state/versions.kv")" '9.9.7-rc.2-2|' '退役后仍能在账本里查到 -2（墓碑）'
-has "$(cat "$B/.dsh-suite/state/versions.kv")" '|retired|' '角色置 retired'
+has "$(cat "$STATE_ROOT/versions.kv")" '9.9.7-rc.2-2|' '退役后仍能在账本里查到 -2（墓碑）'
+has "$(cat "$STATE_ROOT/versions.kv")" '|retired|' '角色置 retired'
 # 第一份的键不受影响（不压缩）
 out="$(run state show 9.9.7-rc.2 2>&1)"
 has "$out" 'role' '第一份仍在账本'
@@ -96,10 +103,10 @@ hasnt "$out" '9.9.7-rc.2-2' '第一份的键没有被改写成别的'
 # 再新增一份：必须拿 -3，绝不重用 -2
 mkck ck-3 9.9.7-rc.2
 run state --init >/dev/null 2>&1
-has "$(cat "$B/.dsh-suite/state/versions.kv")" '9.9.7-rc.2-3' '新的一份拿到 -3（不重用已退役的 -2）'
+has "$(cat "$STATE_ROOT/versions.kv")" '9.9.7-rc.2-3' '新的一份拿到 -3（不重用已退役的 -2）'
 
 echo '--- 5) 快照按键归档（同版本两份不混） ---'
-S2="$B/.dsh-backup/snapshots/9.9.7-rc.2-2"
+S2="$BACKUP_ROOT/snapshots/9.9.7-rc.2-2"
 [ -d "$S2" ] && ok '快照目录用**键**命名（9.9.7-rc.2-2）' || bad '快照没有按键归档'
 [ -f "$(ls -1dt "$S2"/*/ 2>/dev/null | sed -n '1p')/MANIFEST.kv" ] && ok '快照带 MANIFEST' || bad '缺 MANIFEST'
 has "$(cat "$(ls -1dt "$S2"/*/ | sed -n '1p')/MANIFEST.kv")" 'key=9.9.7-rc.2-2' 'MANIFEST 记 key'
@@ -111,7 +118,11 @@ has "$out" '同版本多份' 'doctor 点出同版本多份'
 hasnt "$out" '数据 home 撞车' '数据 home 没有撞车（已分家）'
 
 echo '--- 7) 真机资产未被触碰 ---'
-REAL="$HOME/Mapp/.dsh-suite"
+# 真机根从**真实配置**推导（不调被测工具，避免自定位回退到 cwd）；读不到配置时按约定回退
+_rc="$HOME/.config/rdsh/config"   # 只认**用户**配置：selfupdate 嵌套跑冒烟会注入临时 RDSH_CONFIG（$BASE/rdsh.config），拿它当真机根就会去隔离 base 里找实例 → 嵌套冒烟必挂（2026-10-12 实测）
+_rb="$(sed -nE 's/^[[:space:]]*BASE[[:space:]]*=[[:space:]]*(.*)$/\1/p' "$_rc" 2>/dev/null | tail -1)"
+REAL_ROOT="${_rb:-$HOME/dsh}"            # 空 → 本机约定根（2026-10-11 起 BASE=~/dsh）
+REAL="$REAL_ROOT/.dsh-suite"
 BEFORE="$(find "$REAL/state" "$REAL/trash" -maxdepth 1 2>/dev/null | sort)"
 out="$(run list 2>&1)"
 AFTER="$(find "$REAL/state" "$REAL/trash" -maxdepth 1 2>/dev/null | sort)"
