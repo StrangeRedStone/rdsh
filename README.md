@@ -6,6 +6,26 @@
 >
 > **先看这一句**：rdsh 是给「**已经在用 dsh、想在一台机器上管理多个版本**」的人用的。如果你只是想跑一个 dsh，直接用 `pnpm dlx @deepseek-ai/dsh web` 就行，**不需要本工具**。
 
+## 本仓库的构成：主体与附属
+
+**主体 = `Rdsh.sh`**（本文件主要讲它）：布局解析、实例生命周期、状态账本、版本管理、备份/回收、门面桥接。**只放这一个脚本就能用**。
+
+**附属**：主脚本**没有实现**的能力统统在这里，主脚本只负责**转发命令**；每个附属可**单独阅读**，全部收在 [`docs/附属/`](docs/附属/)。
+
+| 附属 | 一句话 | 谁在用 |
+|---|---|---|
+| [`doctor.sh`](docs/附属/doctor.sh.md) | 九维体检 + 断链修复（只读为主，改前写可还原清单） | `rdsh doctor` |
+| [`migrate.sh`](docs/附属/migrate.sh.md) | 跨版本迁移：备份→建链→搬数据→探针→回退基线 | `rdsh migrate` |
+| [`bootstrap.sh`](docs/附属/bootstrap.sh.md) | 自举安装（新机器可从零、可离线） | 直接执行 |
+| [`plugin-sync.sh`](docs/附属/plugin-sync.sh.md) | 插件权威 ↔ 各 home 副本（三个方向开关） | 直接执行 |
+| [`patch-manager.sh`](docs/附属/patch-manager.sh.md) | 上游补丁集 apply/revert/list（**最贵的一层**） | 直接执行 |
+| [`rdsh-restart.sh`](docs/附属/rdsh-restart.sh.md) | 重启 + 飞轮续转（含跨进程兜底） | `rdsh restart` / `reboot` 插件 |
+| [`tools/publish.sh`](docs/附属/publish.sh.md) | 维护者：本机 → 发布仓库（白名单 + 隐私守卫） | 维护者手动 |
+| [`plugins.d/`](docs/外部能力.md) | 外部能力：自报家门即成命令 | `rdsh <能力名>` |
+
+> 机器可读的**能力清单**：`rdsh bridge --spec --json`；人读的按脚本速查：[`docs/能力与命令总表.md`](docs/能力与命令总表.md)。
+> 架构与路线：[`docs/架构.md`](docs/架构.md) · [`docs/路线图.md`](docs/路线图.md)；排障：[`docs/故障手册.md`](docs/故障手册.md)。
+
 ## 它解决什么
 
 | 痛点 | rdsh 的做法 |
@@ -177,43 +197,18 @@ rdsh start
 
 ## 扩展 rdsh：外部能力（插件）
 
-把可执行文件放进 `plugins.d/`，它就成为 rdsh 的一条命令，并自动出现在 `rdsh bridge --spec`（dsh 侧 agent 因此能调用它）。**不必改 rdsh 代码。**
-完整格式（`--manifest`、环境变量契约、命名与报错行为）见 [`docs/外部能力.md`](docs/外部能力.md)；自检用 `rdsh selfcheck`。
-参考实现：`plugins.d/session-archive.sh`（会话历史档案库）。
+> **附属/专页**，完整说明见 [`docs/外部能力.md`](docs/外部能力.md)。
+> `plugins.d/` 下任何可执行文件自报 `--manifest` 即成为 rdsh 命令，并聚合进 `rdsh bridge --spec`。
 
 ## 装到新机器（自举安装，0.8.0 起）
 
-新机器上还**没有** rdsh 时，用它自己的入口：
-
-```bash
-# 1) 取到本体（离线可用 --from <已 clone 的目录|tarball>）
-bash bootstrap.sh --base "$BASE"
-
-# 2) 顺手装一个 dsh（可选）
-bash bootstrap.sh --with-dsh latest
-
-# 想先看计划：bash bootstrap.sh --dry-run
-```
-
-七步：**依赖自检**（缺谁点名并给安装命令）→ **取本体**（clone 默认 SSH、失败自动试 HTTPS；目标已是 git 检出则 `pull --ff-only`，幂等）→ **建目录**（`.dsh-suite/{data,shared,backup,logs,state,run,debug,plugins,patches,trash}`）→ **写配置**（`~/.config/rdsh/config`，**只补缺键、绝不覆盖已有值**，显式写全套根以对齐 `.dsh-suite/` 布局）→ **落入口**（`<检出>/rdsh` + `~/.local/bin/rdsh`；**已存在的一律不动**，要替换得显式 `--force`，入口没落成会以退出码 4 报出）→ **可选装 dsh** → **验收**（`rdsh base` / `doctor` / `bridge --spec`）。日志落 `<BASE>/.dsh-suite/logs/bootstrap-<ts>.log`。
-
-之后自更新用 `rdsh selfupdate`：**先备份回滚点**（`dsh-scripts-<ts>/` + `MD5SUMS`）→ **先校验**（语法 + 隐私守卫 + 冒烟，都在源目录里跑、不碰本机）→ **原子替换**（临时名 + `mv`，运行中的脚本靠 inode 续命）→ **失败自动回滚**。校验不过**一个字节都不装**。
+> **附属**，完整说明见 [`docs/附属/bootstrap.sh.md`](docs/附属/bootstrap.sh.md)。
+> 在新机器上从零装好 rdsh（可离线）；未指定位置且是交互终端时**会先问一句**，`--yes` 跳过。
 
 ## rdsh 不在 / 坏了时（0.9.1 起）
 
-**rdsh 是便利层，不是唯一启动路径。** dsh 本体与每版本数据 home 都在磁盘上，任何时候都能手工起：
-
-```bash
-cd "$BASE/rdsh/<检出>"                              # 例：$BASE/rdsh/deepseek-harness-dsh-0.2.0-rc.2
-DSH_HOME="$BASE/.dsh-suite/data/<对象键>" pnpm dsh web --port 3080
-```
-
-裸启动**比 rdsh 少做四件事**：注入 `DSH_HOME`、`ensure_data_home`（首播/建链）、`ensure_built`（install+build）、`registry_put`（实例注解）。所以裸启动最常见的症状是"**找不到自定义的数据目录 / 会话看起来全空**"——数据没丢，只是落到了默认 home。
-
-- 找数据 home 三条路：`rdsh base`／账本 `versions.kv` 的 `key` 列／检出内 `.installed` 的 `key=`
-- 自查入口链：`rdsh doctor --only entry`（rdsh 命令、`<检出>/rdsh`、桌面图标 `Exec`、PATH）
-- 把 rdsh 装回来：`bash bootstrap.sh`（联网）或 `bash bootstrap.sh --from <目录|tarball>`（离线）
-- 完整版：[docs/应急启动.md](docs/应急启动.md)（机器上也有一份 `$BASE/rdsh/应急启动.md`）
+> **附属/专页**，完整说明见 [`docs/应急启动.md`](docs/应急启动.md)。
+> rdsh 本身坏了也能手工把 dsh 起回来；卡里所有路径都从 `BASE` 推导，不写死机器路径。
 
 ## 一个门面（0.9.2 起）
 
@@ -295,21 +290,8 @@ DSH_HOME="$BASE/.dsh-suite/data/<对象键>" pnpm dsh web --port 3080
 
 ## 维护者：本机工作目录 ↔ 发布仓库
 
-本仓库是**发布快照**；日常在用的真身放在**检出根**（默认 `$BASE/rdsh/`）。那个目录同时还放着 dsh 的检出（上游代码，6G+），**所以绝不能把整个目录当仓库**。
-
-两者关系是**单向**的：本机是权威，仓库只是发布目标。
-
-```bash
-# 1) 在 $BASE/rdsh 里改脚本（跟平时一样）
-# 2) 看差异（只读，有差异时退出码 1）
-bash tools/publish.sh --check
-# 3) 把白名单文件集中进仓库
-bash tools/publish.sh --stage
-# 4) 提交并推送
-git add -A && git commit -m "..." && git push
-```
-
-`tools/publish.sh` **只搬运写死在白名单里的那 6 个脚本**，不通配扫目录 —— 所以本机工作目录里的检出（上游代码）永远不会被带进仓库。
+> **附属**，完整说明见 [`docs/附属/publish.sh.md`](docs/附属/publish.sh.md)。
+> 维护者把本机白名单脚本集中进发布仓库（搬运前跑隐私守卫）。
 
 ## 许可证
 
