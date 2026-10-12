@@ -80,7 +80,7 @@
 #                                         #   --set 只改配置一行（多根之间切换用，不搬东西）
 #                                         #   --dry-run 只出计划；--yes 不问（非交互本来就不问）
 #                                         #   --residue <旧根> 零残留扫描（rc=1=还有东西指着旧根）
-#                                         #   --repoint <旧> <新> 纯重绑（还原脚本用它）
+#                                         #   --repoint <旧> <新> 纯重绑活跃区（还原脚本用它；归档区默认不动）
 #                                         #   --unset 删掉配置里的 BASE（回默认 $HOME/Mapp）
 #   rdsh patch list|status|apply|revert|export  # 检出补丁管理（转发 patch-manager.sh）
 #                                         #   apply/revert 会改检出：默认要 --yes，支持 --dry-run
@@ -2063,7 +2063,10 @@ cmd_backup() {
 #   rdsh base <新根> --set      老行为：只改配置里 BASE 一行（多根之间切换用；不搬任何东西）
 #   rdsh base <新根> --dry-run  只出计划
 #   rdsh base --residue <旧根>  零残留扫描：全盘数"还有多少东西指着旧根"（rc=1 表示有残留）
-#   rdsh base --repoint <旧> <新>  纯重绑：把全盘引用由旧前缀改指新前缀（不搬文件；还原脚本用它）
+#   rdsh base --repoint <旧> <新>  纯重绑：把**活跃区**引用由旧前缀改指新前缀（不搬文件；还原脚本用它）
+#                                   ⚠️ 只做**前缀替换**：适用于"布局没变、只换根"。若布局也变过（例：
+#                                      `dsh-plugins/` → `.dsh-suite/plugins/`），必须逐条映射，否则会
+#                                      写出新死链（2026-10-12 真机踩到）。归档区默认不动，`RDSH_REBIND_ARCHIVE=1` 可打开。
 #
 # 为什么这样做（用户 2026-10-12：「能不能在改根时自动跟上改动？毕竟这也是常见操作」）：
 #   此前 rdsh base <新路径> 只改配置一行，盘上的数据目录 / 6 条资产软链 / 账本 / 入口链接
@@ -2326,13 +2329,19 @@ base_rewrite_file() {  # <路径> <kind> <旧1> <新1> … → 0=改了 / 1=无�
   return 1
 }
 
-base_rebind_all() {  # <旧1> <新1> … ：把全盘引用按前缀改指（软链/账本/.map/注册表/回声/入口）
+base_rebind_all() {  # <旧1> <新1> … ：把**活跃区**引用按前缀改指（软链/账本/.map/注册表/回声/入口）
   [ $# -ge 2 ] || return 0
   local root kind f n=0
   while IFS= read -r root; do
     [ -d "$root" ] || continue
     while IFS= read -r f; do
       [ -n "$f" ] || continue
+      # 2026-10-12 用户拍板：**归档区默认不重绑**。backup/trash 里是历史副本（快照=证据），
+      # 改了就不再是"当时的样子"；真要修应在**恢复那一刻**做。要显式打开：RDSH_REBIND_ARCHIVE=1。
+      case "$f" in
+        */.dsh-suite/backup/*|*/.dsh-suite/trash/*|*/.dsh-backup/*)
+          [ "${RDSH_REBIND_ARCHIVE:-0}" = "1" ] || continue ;;
+      esac
       kind="$(base_file_kind "$f")"
       case "$kind" in other) continue ;; esac
       if base_rewrite_file "$f" "$kind" "$@"; then n=$((n+1)); fi
