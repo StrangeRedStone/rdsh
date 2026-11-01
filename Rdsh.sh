@@ -137,7 +137,7 @@
 #   rdsh help
 #
 # 状态账本（state，B1 起）—— 回答"谁是什么角色"，是 rdsh 唯一的权威状态源：
-#   rdsh state [list]                     # 列出账本（对象键/角色/安装时间/来源/检出/数据）
+#   rdsh state [list] [--all]             # 列出账本（默认隐藏 retired；--all 含墓碑）
 #   rdsh state show <目标>                # 看某个对象的全部字段
 #   rdsh state role <目标> <角色>         # 改角色：current|baseline|retire-candidate|retired
 #   rdsh state render                     # 重新生成 $BACKUP_ROOT/回退基线.md（人读视图）
@@ -3649,6 +3649,14 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
 }
 
 state_list() {
+  local show_all=0 a
+  for a in "$@"; do
+    case "$a" in
+      --all|-a|--include-retired) show_all=1 ;;
+      -*) die "未知选项：$a（rdsh state list [--all]）" ;;
+      *) die "多余参数：$a（rdsh state list [--all]）" ;;
+    esac
+  done
   if [ ! -f "$STATE_KV" ]; then
     warn "账本还不存在（$STATE_KV）。先跑：rdsh state --init"
     return 0
@@ -3658,18 +3666,31 @@ state_list() {
     warn "账本还是空的。先跑：rdsh state --init"
     return 0
   fi
-  printf '\n状态账本（%s）—— %s 个对象：\n' "$STATE_KV" "$n"
-  printf '  %-18s %-9s %-22s %-11s %s\n' '对象' '角色' '安装时间' 'commit' '检出'
-  local k
+  # 默认只显示非 retired 对象；墓碑仍可用 --all / state show 查
+  local shown=0 hidden=0 k role
   while IFS= read -r k; do
     [ -n "$k" ] || continue
-    printf '  %-18s %-9s %-22s %-11s %s\n' "$k" "$(state_role_of "$k")" \
+    role="$(state_role_of "$k")"
+    if [ "$role" = "retired" ] && [ "$show_all" = 0 ]; then hidden=$((hidden+1)); continue; fi
+    shown=$((shown+1))
+  done < <(state_keys)
+  printf '\n状态账本（%s）—— %s 个对象' "$STATE_KV" "$shown"
+  [ "$hidden" -gt 0 ] && printf '（另有 %s 个 retired 墓碑；--all 看全部）' "$hidden"
+  printf '：\n'
+  printf '  %-18s %-9s %-22s %-11s %s\n' '对象' '角色' '安装时间' 'commit' '检出'
+  while IFS= read -r k; do
+    [ -n "$k" ] || continue
+    role="$(state_role_of "$k")"
+    [ "$role" = "retired" ] && [ "$show_all" = 0 ] && continue
+    printf '  %-18s %-9s %-22s %-11s %s\n' "$k" "$role" \
       "$(state_kv_get "$k" installed_at)" "$(state_kv_get "$k" commit)" "$(state_kv_get "$k" dir)"
   done < <(state_keys)
   echo
   printf '  数据目录：\n'
   while IFS= read -r k; do
     [ -n "$k" ] || continue
+    role="$(state_role_of "$k")"
+    [ "$role" = "retired" ] && [ "$show_all" = 0 ] && continue
     printf '    %-18s %s\n' "$k" "$(state_kv_get "$k" data)"
   done < <(state_keys)
 }
@@ -3718,7 +3739,8 @@ cmd_state() {
   local sub="list"
   if [ $# -gt 0 ]; then sub="$1"; shift; fi
   case "$sub" in
-    list|ls) state_list ;;
+    list|ls) state_list "$@" ;;
+    --all|-a) state_list --all ;;
     show) state_show "$@" ;;
     role)
       local arg="${1:-}" role="${2:-}"
@@ -3738,7 +3760,7 @@ cmd_state() {
 rdsh state —— 状态账本（唯一权威）
 
 用法:
-  rdsh state [list]                        列出对象（角色/安装时间/来源/commit/检出/数据）
+  rdsh state [list] [--all]                 列出对象（默认隐藏 retired；--all 含墓碑）
   rdsh state show <目标>                   看某对象全部字段 + 它的事件流水
   rdsh state role <目标> <角色>            改角色：installed|current|baseline|retire-candidate|retired
   rdsh state render                        重新生成 $BACKUP_ROOT/回退基线.md（人读视图）
@@ -5116,7 +5138,7 @@ bridge_spec_rows() {  # 每行：id|子命令|参数|风险|默认参数|简介
   cat <<'ROWS'
 rdsh_list|list||read||列出已管理的所有 dsh 版本（键/角色/检出/数据 home）
 rdsh_doctor|doctor|[--only <维度,…>] [--json]|read|--quiet|九维只读体检（环境/检出/数据/插件/账本/链接/日志/配置/磁盘）
-rdsh_state|state list||read||看状态账本：每个对象的角色、安装时间、commit、检出与数据 home
+rdsh_state|state list [--all]||read||看状态账本：默认隐藏 retired；--all 含墓碑（角色/安装时间/commit/检出与数据 home）
 rdsh_scan|scan|--path <目录> / --files <文件…>|read||隐私守卫（私钥/令牌/凭据/会话数据 error；家目录/邮箱/大文件 warn）
 rdsh_settings|settings show||read||看各版本 settings.yaml 的路径、顶层键、与账本指纹是否一致
 rdsh_wake|wake ls||read||看唤醒台账：重启后会续转哪些会话
