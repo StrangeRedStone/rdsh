@@ -3349,6 +3349,13 @@ state_record_install() {  # <检出目录> [角色]：安装完成时登记（�
       if [ -z "$(state_current_key)" ]; then role=current; else role=installed; fi
     fi
   fi
+  # 死者苏生：同一个 key 的旧行如果是 retired，而这次是真实安装/返场登记，就恢复为 installed。
+  # 只改角色，不删墓碑、不重置 installed_at；显式 state role 仍可把它改回 retired。
+  if [ "$role" = "retired" ]; then
+    role=installed
+    warn "返场复活：$key 原为 retired → 重新登记为 installed"
+    state_journal revive "$key" "reinstall/返场，role retired → installed"
+  fi
   inst="$(state_kv_get "$key" installed_at)"
   if [ -z "$inst" ]; then
     # 首次登记：有 .installed 就用它的 mtime（事实），否则记当下
@@ -3531,6 +3538,13 @@ state_init() {  # 首次播种：从检出 + 旧 回退基线.md 反向推断，
     # 同版本第二份的键与首份相同（都从版本号起算），只看"行存在"会把它误判成"已登记"而跳过。
     local kdir; kdir="$(state_kv_get "$key" dir)"
     if [ -n "$kdir" ] && [ "$kdir" = "$dir" ]; then
+      # 死者苏生：同一检出/路径返场，账本行还是 retired → 恢复 installed
+      if [ "$(state_role_of "$key")" = "retired" ]; then
+        state_kv_set "$key" role installed
+        state_kv_set "$key" role_set_at "$(date -Is)"
+        state_journal revive "$key" "state --init 发现同一路径返场，role retired → installed"
+        printf '  返场复活 %-16s %s（role retired → installed）\n' "$key" "$dir"
+      fi
       # 自愈：老账本缺后来新增的字段（如 B8 的 settings/settings_sha）→ 顺手补上
       local h0 f0
       h0="$(state_kv_get "$key" data)"; f0="$(settings_file_of "${h0:-$DATA_ROOT/$ver}")"
