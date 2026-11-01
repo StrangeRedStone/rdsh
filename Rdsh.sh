@@ -3867,7 +3867,7 @@ du_age_days() {  # <YYYY-MM-DD> → 天数（解析不了输出 -1）
   [ -n "$t" ] || { echo -1; return; }
   echo $(( ( $(date +%s) - t ) / 86400 ))
 }
-du_trash_at() { sed -nE 's/^at=(.*)T.*$/\1/p' "$1/.rdsh-trash.kv" 2>/dev/null | tail -1; }
+du_trash_at() { sed -nE 's/^at=(.*)T.*$/\1/p' "$1/.rdsh-trash.kv" 2>/dev/null | tail -1 || true; }
 
 du_report_trash() {
   if [ ! -d "$TRASH_ROOT" ]; then printf '  %-12s %s\n' '回收站' '（空）'; return 0; fi
@@ -3878,11 +3878,11 @@ du_report_trash() {
     n=$((n+1))
     local name at label total reason restored
     name="$(basename "$d")"
-    at="$(sed -nE 's/^at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
-    label="$(sed -nE 's/^label=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
-    total="$(sed -nE 's/^total=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
-    reason="$(sed -nE 's/^reason=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
-    restored="$(sed -nE 's/^restored_at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1)"
+    at="$(sed -nE 's/^at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1 || true)"
+    label="$(sed -nE 's/^label=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1 || true)"
+    total="$(sed -nE 's/^total=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1 || true)"
+    reason="$(sed -nE 's/^reason=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1 || true)"
+    restored="$(sed -nE 's/^restored_at=(.*)$/\1/p' "$d/.rdsh-trash.kv" 2>/dev/null | tail -1 || true)"
     printf '      %-34s %-7s %-11s %s%s\n' "$name" "${total:--}" "${at%%T*}" "${reason:--}" \
       "$([ -n "$restored" ] && printf '  [已还原 %s]' "${restored%%T*}")"
     local o
