@@ -2,6 +2,31 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.2 — 2026-11-01
+
+> 主题：**端口归属不再两套口径**（9230 说"实例占用"、`stop 9230` 说"没有实例"）。
+
+### 修复
+
+- `rdsh start` 的端口占用检查此前拿 `proc_cwd`（进程目录）当"检出"报出去。dsh 0.2.1 起一个 web 进程会
+  **额外监听 inspector/CDP 侧信道端口**（`experimental-inspector` 默认 **9230**，被占则顺延 9231…），
+  于是侧信道被报成"运行中的另一版本/检出"，而 `rdsh stop` 查实例表又说"没有这个实例"——同一端口两套口径。
+- 新增唯一判据 `port_instance_identity`（`instance:<端口>` / `side:<实例端口>` / `dsh-web:<pid>` / `other`）
+  与唯一人话 `port_owner_desc`，`cmd_start` 的计划与 `launch_entry` 的硬门都改用它：
+  - **侧信道** → `实例 3080 的 inspector/CDP 侧信道（同一 pid …；该实例的检出：…）—— 它不是独立实例，换端口别用 9230`
+  - **实例端口** → `已运行的实例（端口 3080，pid …）`
+  - **非 dsh 进程** → `非 dsh 进程（pid …，cmd：…）`，不再伪造"检出"
+- **归属校验前置**：注册表里 pid 对得上但并非 dsh web 的进程，不再被当成实例（同 `is_dsh_web_pid` 口径）。
+- 诚实边界（未改）：为兼容旧实例，`rdsh stop <端口>` 仍只认**实例表**里的端口；侧信道端口要停，
+  报错会明确指向真正的实例端口（`rdsh stop --port 3080`）。
+
+### 验证
+
+- 新冒烟 `tools/smoke-port-owner.sh`：**13/0**（真子进程夹具 `tools/fixtures/fake-dsh-web.c`，
+  argv 改写成 `bin.ts web` + 同时监听两端口；覆盖侧信道/实例/非 dsh 进程/遇到占用 fail-fast 四类）。
+- 全量 14 份冒烟：隔离 HOME 与真实 HOME **全 0 失败**；`bash -n` 全过、`shellcheck -S error` 0 条。
+- 真机现场复验：`rdsh 2 --port 9230 --dry-run` 现在输出"实例 3080 的侧信道…"，不再说"运行中检出：另一版本"。
+
 ## 1.0.1 — 2026-10-12
 
 > 主题：**归档区默认不重绑**（用户拍板）+ `--repoint` 的诚实边界。

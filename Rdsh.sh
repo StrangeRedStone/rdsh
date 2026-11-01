@@ -727,6 +727,59 @@ instances_live() {  # 真相层：ss + /proc（**测试可用 RDSH_NO_LIVE_INSTA
   done
 }
 
+# 端口的"实例身份"（2026-11-01 修 9230 口径不一）：一个 dsh web 进程可能同时听两个端口 ——
+# 实例端口（web）与 inspector/CDP 侧信道（0.2.1 起，默认 9230，被占则顺延）。两者都不是"另一个实例"。
+# 以前 start 的占用检查把 proc_cwd 当"检出"报出去，于是把侧信道说成"运行中的另一版本"，而 stop
+# 查实例表又说"没有这个实例" —— 同一端口两套口径。这里给唯一的判据与唯一的人话描述。
+port_instance_identity() {  # <端口> → instance:<端口>|side:<实例端口>|dsh-web:<pid>|other  （恒返回 0）
+  local p="$1" pid q
+  pid="$(port_pid "$p")"
+  [ -n "$pid" ] || { printf 'other'; return 0; }
+  # 归属校验前置：只承认"我们的 dsh web"（同 is_dsh_web_pid 的口径）。
+  # 没有这一层，注册表里一条 pid 对得上的**普通进程**也会被当成实例 → 报错会撒谎。
+  if ! is_dsh_web_pid "$pid"; then printf 'other'; return 0; fi
+  # ① 该端口自己就是注册表里的实例端口（pid 对得上）→ instance
+  if [ -f "$INSTANCES_DIR/$p.kv" ] && [ "$(registry_get "$p" pid)" = "$pid" ]; then
+    printf 'instance:%s' "$p"; return 0
+  fi
+  # ② 同一 pid 还在别的**已登记**端口上监听 → 那个才是实例，本端口是侧信道
+  for q in $(listening_ports); do
+    [ "$q" = "$p" ] && continue
+    [ "$(port_pid "$q")" = "$pid" ] || continue
+    [ -f "$INSTANCES_DIR/$q.kv" ] || continue
+    [ "$(registry_get "$q" pid)" = "$pid" ] || continue
+    printf 'side:%s' "$q"; return 0
+  done
+  # ③ 是 dsh web 进程但没在实例表里（旧实例/手工起的）
+  printf 'dsh-web:%s' "$pid"
+  return 0
+}
+
+port_owner_desc() {  # <端口> → 人话：这个端口到底被谁占着（供 start 的报错用）；恒返回 0
+  local p="$1" pid ident dir ver rp
+  pid="$(port_pid "$p")"
+  if [ -z "$pid" ]; then printf '未知（ss 拿不到 owner；可能需要权限）'; return 0; fi
+  ident="$(port_instance_identity "$p")"
+  case "$ident" in
+    side:*)
+      rp="${ident#side:}"; dir="$(port_owner_cwd "$rp")"
+      printf '实例 %s 的 inspector/CDP 侧信道（同一 pid %s；该实例的检出：%s）—— 它不是独立实例，换端口别用 %s' \
+        "$rp" "$pid" "${dir:-未知}" "$p"
+      ;;
+    instance:*)
+      printf '已运行的实例（端口 %s，pid %s）' "${ident#instance:}" "$pid"
+      ;;
+    dsh-web:*)
+      dir="$(proc_cwd "$pid")"; ver="$(read_version "${dir:-/nonexistent}")"
+      printf '另一个 dsh web 进程（pid %s，版本 %s，检出 %s），但它没在本实例表里登记' "$pid" "${ver:-未知}" "${dir:-未知}"
+      ;;
+    *)
+      printf '非 dsh 进程（pid %s，cmd：%s）' "$pid" "$(proc_cmdline "$pid" | cut -c1-120)"
+      ;;
+  esac
+  return 0
+}
+
 # ---- stop：优雅停止实例（归属校验 + 自杀防护） ----
 # 家规：绝不用 pkill/pgrep -f；只对"过得了 is_dsh_web_pid"的进程动手，且绝不强杀（-9）。
 proc_ppid() { awk '{print $4}' "/proc/$1/stat" 2>/dev/null || true; }
@@ -918,8 +971,7 @@ launch_entry() {
   log "监听端口: $port"
   if [ "$dry" = "1" ]; then echo "DSH_HOME  : $data"; return 0; fi
   if port_busy "$port"; then
-    local owner; owner=$(port_owner_cwd "$port")
-    die "127.0.0.1:$port 已被占用（运行中检出：${owner:-未知}）。请先停掉旧实例，或用 --port 换端口。"
+    die "127.0.0.1:$port 已被占用：$(port_owner_desc "$port")。请先停掉旧实例，或用 --port 换端口。"
   fi
   ensure_data_home "$data"
   ensure_built "$dir"
@@ -1658,8 +1710,9 @@ cmd_start() {
       [ -z "$bad" ] && bad="数据目录 $ehome 已在端口 $conflict 上运行。同一 DSH_HOME 多开会互相写 workspace/settings —— 同版本多开请用 rdsh debug new。"
     elif port_busy "$p"; then
       if [ "$explicit_port" = "1" ]; then
-        msg="✗ 端口 $p 已被占用（运行中检出：$(port_owner_cwd "$p")）"
-        [ -z "$bad" ] && bad="127.0.0.1:$p 已被占用（运行中检出：$(port_owner_cwd "$p")）。换 --port，或先 rdsh stop。"
+        local why; why="$(port_owner_desc "$p")"
+        msg="✗ 端口 $p 已被占用：$why"
+        [ -z "$bad" ] && bad="127.0.0.1:$p 已被占用：$why。换 --port，或先 rdsh stop。"
       else
         local np; np="$(port_free_from $((p + 1)))"
         msg="! 端口 $p 被占，改用 $np"
