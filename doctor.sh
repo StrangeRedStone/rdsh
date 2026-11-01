@@ -559,12 +559,17 @@ dim_instances() {
   command -v ss >/dev/null 2>&1 || { find_f info instances '没有 ss，无法探测实例'; N_OBJECTS=$((N_OBJECTS+1)); DIM_LINES+=("实例 n/a"); return; }
   local rows p pid dir home cmd n=0
   declare -A seen_home=()
+  local seen_pids=" "
   rows="$(ss -ltnpH 2>/dev/null | awk '{p=$4; sub(/.*:/,"",p); if (p ~ /^[0-9]+$/) print p}' | sort -un)"
   for p in $rows; do
     pid="$(ss -ltnpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
     [ -n "$pid" ] || continue
+    # 同一进程可以监听多个端口（0.2.1 起 web 进程默认再开 inspector/CDP 端口 9230）。
+    # 按 pid 去重，否则会把一个实例误报成「两个端口共用一个 home」。
     cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
     case "$cmd" in *"bin.ts web"*|*"dsh web"*) ;; *) continue ;; esac
+    case " $seen_pids " in *" $pid "*) continue ;; esac
+    seen_pids="$seen_pids$pid "
     dir="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
     home="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -nE 's/^DSH_HOME=(.*)$/\1/p' | head -1 || true)"
     n=$((n+1))

@@ -73,6 +73,15 @@
 #   rdsh trash ls | restore <条目名|--last> [--force]
 #                                         # 回收站（永不 rm 的落点）：条目带清单与还原命令
 #   rdsh logs [-f] [版本|序号] [-o]       # 查看/打开启动日志（--clean 清理旧日志）
+#   rdsh archive collect/ls/show/export/verify/inject/browse/scan/pick
+#                                         # 会话档案库（外部能力 session-archive.sh）：scan 直扫源 home
+#                                         #   列标题/首条消息；pick 纯 bash 选择，--select-only 出迁移清单
+#                                         #   （详见 rdsh archive --help / skill migrate-specialize）
+#   rdsh cd [<目标>] [--manage] [--list/--json] [--enter] [--exec -- <命令…>]
+#                                         # 打印已管理检出的**绝对路径**（给 $(…) 用）；
+#                                         #   --list 列全部；--json 机器可读；--manage 指向部署目录
+#                                         #   （migrate.sh 所在处）；--enter 进子 shell；--exec 跑命令。
+#                                         #   父 shell 的 cwd 改不了，所以默认只打印，不假装 cd。
 #   rdsh base [路径] [--set|--dry-run|--yes|--unset]   # 基目录（唯一旋钮）：**默认自动跟上**
 #                                         #   rdsh base <新根> = 出计划 → 确认 → 搬迁检出/数据/资产/
 #                                         #     账本 + 全盘重绑（软链/`.map`/注册表/回声/入口）→ 自检
@@ -84,6 +93,11 @@
 #                                         #   --unset 删掉配置里的 BASE（回默认 $HOME/Mapp）
 #   rdsh patch list|status|apply|revert|export  # 检出补丁管理（转发 patch-manager.sh）
 #                                         #   apply/revert 会改检出：默认要 --yes，支持 --dry-run
+#   rdsh migrate --from <版本> --to <版本> (--all / --items a,b,c) [--sessions none/all/file:<json>]
+#                [--dry-run] [-f] [--provider id]
+#                                         # 版本迁移前门（外部能力 plugins.d/rdsh-migrate.sh）：
+#                                         #   发现通用/特化提供者 → plan 闸门 → 真迁移写日志；
+#                                         #   零交互，所有选择显式；不自动启动目标。
 #   rdsh fetch --list [--refresh]         # 列远端可用版本（GitHub API 列举 + 10 分钟缓存；失败回退 git ls-remote）
 #   rdsh fetch <版本> [--dir <名>] [--tarball] [--full] [--install] [--dry-run]
 #                                         # 拉取指定版本检出到 $BASE/dsh/（默认 git clone --depth 1，与官方源码装法一致，
@@ -325,7 +339,7 @@ plugin_dispatch() {  # <子命令> [参数…] → 命中则 exec（不返回）
       case "$row" in ''|'#'*|iface=*) continue ;; esac
       rid="${row%%|*}"; rest="${row#*|}"; rsc="${rest%%|*}"
       if [ "$rsc" = "$sub" ] || [ "${rsc%% *}" = "$sub" ]; then
-        log "外部能力：$sub（$rid，来自 $(basename "$f")）"
+        printf '\033[1;34m[rdsh]\033[0m 外部能力：%s（%s，来自 %s）\n' "$sub" "$rid" "$(basename "$f")" >&2
         plugin_env "$rid"
         shift
         exec "$f" "$@"
@@ -689,11 +703,14 @@ instances_live() {  # 真相层：ss + /proc（**测试可用 RDSH_NO_LIVE_INSTA
   # 为什么要这个缝：`ss` 看的是**真机**，隔离 BASE 的冒烟藏不住它 ——
   # 实测因此把唤醒台账写进了真机 home。测试里请置 RDSH_NO_LIVE_INSTANCES=1。
   if [ "${RDSH_NO_LIVE_INSTANCES:-0}" = "1" ]; then return 0; fi
-  local p pid dir data ver kind id unit started f seen=""
+  local p pid dir data ver kind id unit started f seen="" seen_pids=" "
   for p in $(listening_ports); do
     pid="$(port_pid "$p")"
     [ -n "$pid" ] || continue
     is_dsh_web_pid "$pid" || continue
+    # 0.2.1 起 web 进程会再监听 inspector/CDP 端口（如 9230）；同一 pid 只算一个实例。
+    case " $seen_pids " in *" $pid "*) continue ;; esac
+    seen_pids="$seen_pids$pid "
     dir="$(proc_cwd "$pid")"; data="$(proc_home "$pid")"
     ver="$(read_version "${dir:-/nonexistent}")"
     kind="$(registry_get "$p" kind)"; [ -n "$kind" ] || kind=real
@@ -1446,6 +1463,107 @@ cmd_exec() {  # exec <版本|序号|项目名|debug-id|路径> -- <命令...>
   [ -d "$dir" ] || die "检出不存在：$dir"
   log "环境 $home（检出 $dir）"
   ( cd "$dir" && DSH_HOME="$home" exec "${args[@]}" )
+}
+
+cmd_cd() {  # cd [<目标>] [--manage] [--list|--json] [--enter] [--exec -- <命令...>]
+  # 设计：默认**打印**检出绝对路径（给 $(...) 用）。父 shell 的 cwd 无法被子进程改，
+  # 所以 --enter 明确表示"进一个子 shell"；rdsh 不做图形界面（TUI/GUI 由 dsh 提供）。
+  local target="" list=0 json=0 enter=0 exec_mode=0 manage=0 a
+  local -a args=()
+  while [ $# -gt 0 ]; do
+    a="$1"
+    case "$a" in
+      --list|-l ) list=1 ;;
+      --json ) json=1 ;;
+      --enter|-e ) enter=1 ;;
+      --exec ) exec_mode=1 ;;
+      --manage|-m ) manage=1 ;;
+      -- ) shift; args=("$@"); break ;;
+      -h|--help )
+        printf '用法: rdsh cd [<目标>] [--manage] [--list|--json] [--enter] [--exec -- <命令…>]\n'
+        printf '  默认打印已管理检出的绝对路径；--list 列出全部；--json 机器可读；\n'
+        printf '  --manage 指向 rdsh 部署目录（migrate.sh / patch-manager.sh 所在处）；\n'
+        printf '  --enter 进入该目录的子 shell；--exec 在该目录下执行命令。\n'
+        return 0 ;;
+      -* ) die "未知选项：$a（用 rdsh cd --help）" ;;
+      * ) if [ -z "$target" ]; then target="$a"; else die "多余参数：$a"; fi ;;
+    esac
+    shift
+  done
+  [ "$enter" = 1 ] && [ "$exec_mode" = 1 ] && die '--enter 与 --exec 只能选一个'
+  [ "$exec_mode" = 1 ] && [ "${#args[@]}" -eq 0 ] && die '--exec 需要 -- <命令…>（例如 rdsh cd --manage --exec -- bash migrate.sh a b）'
+  { [ "$exec_mode" = 1 ] || [ "$enter" = 1 ]; } && [ -z "$target" ] && [ "$manage" = 0 ] && die '--exec / --enter 需要先给目标（或 --manage）'
+  [ "$list" = 1 ] && [ -n "$target" ] && die '--list 不接受目标'
+  [ "$manage" = 1 ] && [ -n "$target" ] && die '--manage 不接受目标'
+  if [ "$json" = 1 ] && ! command -v jq >/dev/null 2>&1; then die '--json 需要 jq'; fi
+
+  # rdsh 部署目录（migrate.sh 等脚本所在处；不是检出）
+  if [ "$manage" = 1 ]; then
+    local dir="$MANAGE_ROOT" home=""
+    [ -d "$dir" ] || die "rdsh 部署目录不存在：$dir"
+    if [ "$json" = 1 ]; then jq -cn --arg dir "$dir" '{kind:"manage",dir:$dir}'; return 0; fi
+    if [ "$exec_mode" = 1 ]; then ( cd "$dir" && unset DSH_HOME; exec "${args[@]}" ); return 0; fi
+    if [ "$enter" = 1 ]; then ( cd "$dir" && unset DSH_HOME; exec "${SHELL:-bash}" -i ); return 0; fi
+    printf '%s\n' "$dir"; return 0
+  fi
+
+  # 列表（无目标 / --list）
+  if [ "$list" = 1 ] || [ -z "$target" ]; then
+    if [ "$json" = 1 ]; then
+      local first=1 e ver dir base data key role
+      printf '['
+      for e in "${ENTRIES[@]}"; do
+        ver=$(entry_field "$e" 1); dir=$(entry_field "$e" 2); base=$(entry_field "$e" 3); data=$(entry_field "$e" 4)
+        key=$(entry_key "$e"); role="$(state_role_of "$key")"
+        [ "$first" = 1 ] || printf ','
+        jq -cn --arg key "$key" --arg version "$ver" --arg role "$role" \
+          --arg dir "$dir" --arg data "$data" --arg base "$base" \
+          '{key:$key,version:$version,role:$role,dir:$dir,data:$data,base:$base}'
+        first=0
+      done
+      printf ']\n'
+    else
+      local i=1 e ver dir base data key role
+      printf '已管理检出（%d）：\n' "${#ENTRIES[@]}"
+      for e in "${ENTRIES[@]}"; do
+        ver=$(entry_field "$e" 1); dir=$(entry_field "$e" 2); base=$(entry_field "$e" 3); data=$(entry_field "$e" 4)
+        key=$(entry_key "$e"); role="$(state_role_of "$key")"
+        printf '  [%d] %-20s %-12s %-16s 检出: %s\n' "$i" "$key" "$(built_status "$dir")" "$role" "$dir"
+        printf '       数据: %s\n' "$data"
+        i=$((i+1))
+      done
+      printf '用 rdsh cd <序号|版本|目录名|路径> 打印单个路径；或其 --enter / --exec。\n'
+    fi
+    return 0
+  fi
+
+  local dir home entry
+  if [ -n "$(debug_get "$target" home)" ]; then
+    debug_load "$target" >/dev/null 2>&1 || die "调试环境 $target 不可用"
+    dir="$(debug_get "$target" dir)"; home="$(debug_home "$target")"
+  else
+    entry="$(resolve_target "$target")"
+    [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理，先 rdsh add <路径> --mode iso|link|body'
+    dir="$(entry_field "$entry" 2)"; home="$(entry_field "$entry" 4)"
+    local ver; ver="$(entry_field "$entry" 1)"
+  fi
+  [ -d "$dir" ] || die "检出不存在：$dir"
+
+  if [ "$json" = 1 ]; then
+    jq -cn --arg dir "$dir" --arg data "${home:-}" '{dir:$dir,data:$data}'
+    return 0
+  fi
+  if [ "$exec_mode" = 1 ]; then
+    log "环境 ${home:-（默认）}（检出 $dir）"
+    ( cd "$dir" && DSH_HOME="${home:-}" exec "${args[@]}" )
+    return 0
+  fi
+  if [ "$enter" = 1 ]; then
+    log "进入子 shell：$dir（DSH_HOME=${home:-（默认）}；exit 返回）"
+    ( cd "$dir" && export DSH_HOME="${home:-}"; exec "${SHELL:-bash}" -i )
+    return 0
+  fi
+  printf '%s\n' "$dir"
 }
 
 # ---- 子命令实现 ----
@@ -5010,6 +5128,7 @@ rdsh_trash_ls|trash ls||read||看回收站条目（时间/标签/体积/原因/�
 rdsh_trash_restore|trash restore|--last / <条目名> [--force]|write|--last --dry-run|按清单整份还原（退役与恢复的后路）；目标已存在会跳过，--force 才腾位
 rdsh_retire|retire|<目标…> [--apply] [--force]|destructive||退役一个版本（五类足迹）；**默认只出计划**，--apply 才动，--force 才碰回退基线/最后一版
 rdsh_restart|restart|[<目标>] [--dry-run] [--probe] [--wake <提示词>] [--session <会话id>]|destructive|--dry-run|重启当前 dsh（转发 rdsh-restart.sh）；--wake + --session 会在重启前登记「重启后继续做什么」；默认 dry-run，真重启要显式去掉
+rdsh_cd|cd|[<目标>] [--list/--json] [--enter] [--exec -- <命令…>]|read||打印/进入已管理检出目录（cd 的脚本友好版）
 rdsh_selfcheck|selfcheck||read||三份命令清单（help/派发/契约）一致性自检 + 外部能力接口检查
 ROWS
   plugin_rows        # 外部能力（plugins.d/）追加进来；没有则不输出
@@ -5530,6 +5649,7 @@ main() {
     stop|down ) shift; cmd_stop "$@" ;;
     debug ) shift; cmd_debug "$@" ;;
     exec ) shift; cmd_exec "$@" ;;
+    cd ) shift; cmd_cd "$@" ;;
     add ) shift; cmd_add "$@" ;;
     install ) shift; cmd_install "$@" ;;
     data ) shift; cmd_data "$@" ;;
