@@ -197,7 +197,7 @@ _plugin="$(expand "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")"
 
 MANAGE_ROOT="${_manage:-$BASE/rdsh}"
 # 经典布局兼容：未显式配置时，若 $BASE/rdsh 没有 Rdsh.sh 而 $BASE/dsh 有，用经典的 $BASE/dsh。
-# （2026-10-11：新布局收敛到 $BASE/{rdsh,.dsh-suite,coldD}，故默认改为 rdsh；老布局自动回退。）
+# （2026-10-11：新布局收敛到 $BASE/{rdsh,.dsh-suite,Archive}，故默认改为 rdsh；老布局自动回退。）
 if [ -z "$_manage" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ] && [ -f "$BASE/dsh/Rdsh.sh" ]; then MANAGE_ROOT="$BASE/dsh"; fi
 # 可移植性回退：仍未找到时，改用脚本自身目录，这样 `git clone` 到任意目录后可直接跑。
 if [ -z "$_manage" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
