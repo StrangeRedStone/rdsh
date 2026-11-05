@@ -110,6 +110,11 @@ jobs:
           set -e
           bash tools/smoke-port-owner.sh ./Rdsh.sh
 
+      - name: 功能冒烟（base 改根守卫：旧根有实例在跑必须硬拒绝）
+        run: |
+          set -e
+          bash tools/smoke-base-guard.sh ./Rdsh.sh
+
       - name: 文档路径表（机写校验：与 `rdsh base --print-paths` 真源逐字节一致）
         run: |
           set -e
