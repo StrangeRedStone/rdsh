@@ -41,6 +41,14 @@ render_block() {
              -u DSH_LOG_DIR -u DSH_WEB_PORT -u RDSH_PLUGIN_ROOT -u RDSH_TRASH \
              bash "$RDSH" base --print-paths 2>/dev/null)"
 
+  # MANAGE_ROOT 在没有配置/检出时会回退到脚本自身目录（见 Rdsh.sh）；
+  # 文档块展示的是「默认值（相对 $BASE）」，此时应固定为 $BASE/rdsh，
+  # 否则 CI 的干净 HOME 会把 runner 绝对路径渲染进块里 → --check 必红。
+  case "$MANAGE_ROOT" in
+    "$BASE"|"$BASE"/*) ;;
+    *) MANAGE_ROOT="$BASE/rdsh" ;;
+  esac
+
   rel() {  # 绝对路径 → 相对 $BASE（可移植）；不在 BASE 下则原样
     case "$1" in
       "$BASE")   printf '$BASE' ;;
