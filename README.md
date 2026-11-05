@@ -32,7 +32,7 @@
 |---|---|
 | 换一个 dsh 版本 = 一次高风险手工搬迁 | `migrate.sh` 一条命令：备份 → 建链 → 搬数据 → 装插件 → 探针 → 记回退基线 |
 | 多版本并行时数据互相污染 | 每个版本独立 `DSH_HOME`（`$BASE/.dsh-suite/data/<版本>/`） |
-| 与版本无关的作者资产（skills / lessons / AGENTS）在版本间分叉 | 外置到**稳定根** `$BASE/.dsh-shared/`，各版本 home 内只建软链 |
+| 与版本无关的作者资产（skills / lessons / AGENTS）在版本间分叉 | 外置到**稳定根** `$BASE/.dsh-suite/shared/`，各版本 home 内只建软链 |
 | 插件代码在新旧版本各存一份、修一处另一处不变 | **权威副本** `$BASE/.dsh-suite/plugins/` + `plugin-sync.sh`（带方向守卫） |
 | 升级换了检出，打过的补丁全丢 | `patch-manager.sh` 重放补丁，冲突即停手、绝不半应用 |
 | 升级后想回退但没有基线 | 每次迁移把「源/目标/备份/还原命令/探针结论」追加进 `回退基线.md` |
@@ -160,22 +160,31 @@ rdsh start
 
 优先级：**环境变量 > 配置文件 > 默认**。配置文件默认 `~/.config/rdsh/config`（纯 `KEY=VALUE`，**不 source**，可用 `RDSH_CONFIG` 指定）。示例见 [`examples/config`](examples/config)。
 
+路径类变量由 `tools/render-docs.sh` 从 `rdsh base --print-paths` 生成（**勿手改**；CI 逐字节校验）：
+
+<!-- PATHS:BEGIN -->
+| 派生路径 | 默认值（相对 `$BASE`） | 环境变量覆盖 | 用途 |
+|---|---|---|---|
+| `BASE` | 默认 `$HOME/Mapp`（本机实际值见 `rdsh base`） | `RDSH_BASE` | 唯一旋钮；下列默认值都由它派生 |
+| `MANAGE_ROOT` | `$BASE/rdsh` | `RDSH_MANAGE_ROOT` | 检出根（`Rdsh.sh` 与各检出所在；经典 `$BASE/dsh` 自动回退） |
+| `DATA_ROOT` | `$BASE/.dsh-suite/data` | `RDSH_DATA_ROOT` | 数据根（每版本一个 `DSH_HOME`） |
+| `SHARED_ROOT` | `$BASE/.dsh-suite/shared` | `RDSH_SHARED_HOME` | 作者资产稳定根（skills / 三库 / AGENTS） |
+| `BACKUP_ROOT` | `$BASE/.dsh-suite/backup` | `RDSH_BACKUP_ROOT` | 备份根（快照 + 回退基线） |
+| `LOG_DIR` | `$BASE/.dsh-suite/logs` | `DSH_LOG_DIR` | 启动日志（含访问 token，勿外传） |
+| `RUN_DIR` | `$BASE/.dsh-suite/run` | `RDSH_RUN_DIR` | 实例注册表（注解层；真相是 `ss` + `/proc`） |
+| `STATE_ROOT` | `$BASE/.dsh-suite/state` | `RDSH_STATE_ROOT` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
+| `TRASH_ROOT` | `$BASE/.dsh-suite/trash` | `RDSH_TRASH` | 回收站（默认与 BASE 同文件系统） |
+| `PLUGIN_ROOT` | `$BASE/.dsh-suite/plugins` | `RDSH_PLUGIN_ROOT` | 插件权威副本 |
+| `PATCHES_ROOT` | `$BASE/.dsh-suite/patches` | `RDSH_PATCHES` | 补丁仓 |
+| 默认端口 | `3080` | `DSH_WEB_PORT` / `--port` | dsh web 监听端口 |
+<!-- PATHS:END -->
+
+其余非路径变量的默认值（手写；变动频率低）：
+
 | 变量 | 默认 | 含义 |
 |---|---|---|
-| `RDSH_BASE` | `$HOME/Mapp` | 唯一旋钮，下列默认值都从它派生 |
-| `RDSH_MANAGE_ROOT` | `$BASE/rdsh` | 检出根（经典布局 `$BASE/dsh` 自动回退） |
-| `RDSH_DATA_ROOT` | `$BASE/.dsh-suite/data` | 数据根（每版本一个 home） |
-| `RDSH_BACKUP_ROOT` | `$BASE/.dsh-suite/backup` | 备份根 |
-| `RDSH_SHARED_HOME` | `$BASE/.dsh-suite/shared` | 作者资产稳定根 |
-| `RDSH_PLUGIN_ROOT` | `$BASE/.dsh-suite/plugins` | 插件权威副本 |
-| `DSH_LOG_DIR` | `$BASE/.dsh-suite/logs` | 启动日志目录 |
-| `RDSH_TRASH` | `$BASE/.dsh-suite/trash` | 回收站根。**默认与 `BASE` 同文件系统** —— 跨设备 `mv` 会退化成"复制+删除"（慢、瞬时双份占用），旧默认 `/tmp` 还可能是 tmpfs（≈内存） |
 | `RDSH_TRASH_KEEP_DAYS` | `7` | 回收项小于这个天数时，`du --purge trash` 需要 `--force` |
-| `RDSH_STATE_ROOT` | `$BASE/.dsh-suite/state` | 状态账本（唯一权威）：`versions.kv` + `journal.log` |
 | `RDSH_MYDSH_REPO` | （空） | 「我的 dsh」本地克隆路径；`rdsh restore` 不写 `--from` 时用它 |
-| `RDSH_PATCHES` | `$BASE/dsh-patches` | 补丁仓（与 `patch-manager.sh` 同默认） |
-| `RDSH_RUN_DIR` | `$BASE/.dsh-suite/run` | 实例注册表（注解层，真相是 `ss` + `/proc`） |
-| `RDSH_DEBUG_ROOT` | `$BASE/.dsh-suite/debug` | 调试沙箱（`rdsh debug`） |
 | `RDSH_CONFIG` | `~/.config/rdsh/config` | 配置文件路径 |
 
 ## 状态账本（state，0.4.0 起）
@@ -271,8 +280,8 @@ rdsh start
 
 ## 已知限制（诚实边界）
 
-- **检出放在 `MANAGE_ROOT` 下**（默认 `$BASE/dsh`）。未显式配置、且 `$BASE/dsh` 不是本工具所在处时，`MANAGE_ROOT` 会回退到**脚本自身目录**——所以 `git clone` 到任意目录后可直接运行，检出也会落在那里（已被 `.gitignore` 忽略）。要换位置用 `rdsh base <路径>` 或设 `RDSH_MANAGE_ROOT`。
-- **写功能冒烟要连配置一起隔离**：`RDSH_CONFIG` 若被环境注入、或 `$BASE/dsh` 里没有 `Rdsh.sh`（触发自定位回退），"只换 HOME"的隔离测试仍会打到真机。`tools/smoke-state.sh` 演示了正确做法。
+- **检出放在 `MANAGE_ROOT` 下**（默认 `$BASE/rdsh`；经典 `$BASE/dsh` 自动回退）。未显式配置、且 `$BASE/rdsh` 不是本工具所在处时，`MANAGE_ROOT` 会回退到**脚本自身目录**——所以 `git clone` 到任意目录后可直接运行，检出也会落在那里（已被 `.gitignore` 忽略）。要换位置用 `rdsh base <路径>` 或设 `RDSH_MANAGE_ROOT`。
+- **写功能冒烟要连配置一起隔离**：`RDSH_CONFIG` 若被环境注入、或 `$BASE/rdsh` 里没有 `Rdsh.sh`（触发自定位回退），"只换 HOME"的隔离测试仍会打到真机。`tools/smoke-state.sh` 演示了正确做法。
 - **状态账本首次使用要播种**：0.4.0 之前装的机器没有账本，`rdsh state list` 会提示 `--init`；未播种时 `rdsh list` 的角色列显示 `-`（不报错）。
 - `plugin-sync` 的方向判断基于 **mtime**，是近似值（`cp -a` 会保留时间、手改会刷新）；更稳的「构建记录」尚未实现。
 - 插件权威副本「谁最新」目前由人（或 `--adopt`）决定，**没有自动构建流水线**。
