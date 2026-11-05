@@ -2,6 +2,25 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.4 — 2026-11-05
+
+> 主题：**外部能力的脚手架与自检**（`rdsh plugin new/check/ls`）。
+
+### 新增
+
+- **`rdsh plugin new <名> [.sh|.py]`**：在 `$RDSH_PLUGINS_DIR` 生成**可跑的最小骨架**
+  （`--manifest` 输出 `iface=1` + 一行 `x-<名>|...` 6 字段；`--help`；未知参数非 0），
+  写完即用 `sed` 把占位名替换成真名并 `chmod +x`。已存在则拒绝覆盖。
+- **`rdsh plugin check [<文件>…]`**：校验外部能力——可执行、`--manifest` 有输出且 rc=0、
+  `iface` 等于期望、每行正好 6 字段、id 带 `x-` 前缀、id 跨文件唯一；逐文件 OK/FAIL + 汇总。
+- **`rdsh plugin ls`**：列出已装能力的 id / 子命令 / 风险 / 来源文件。
+- 新冒烟 `tools/smoke-plugin.sh`（22 项，含 5 个必红负样本：5 字段 / 无 x- / 撞名 / 不可执行 / 空 manifest）。
+
+### 验证
+
+- `smoke-plugin` **22/0**；真机 `rdsh plugin check` 3/3 通过（dvd / migrate / archive）；
+- 全套 CI 冒烟（隔离 HOME）全 0 失败；`selfcheck` 三份清单一致（help 33 / 派发 47 / 契约 17）。
+
 ## 1.0.3 — 2026-11-05
 
 > 主题：**install 的反面**（`rdsh uninstall`）+ 插件维护单入口（`rdsh plugins`）。

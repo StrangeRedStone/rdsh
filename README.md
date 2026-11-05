@@ -78,6 +78,7 @@
 | `rdsh state [list\|show\|role\|render\|sync\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
 | `rdsh plugins [子命令…]` | **插件维护单入口**（转发 `plugin-sync.sh`）：`status`/`sync`/`adopt` 等；权威副本 `$PLUGIN_ROOT`，各版本 home 内是可覆盖副本 |
+| `rdsh plugin new\|check\|ls` | **外部能力脚手架**：`new` 在 `plugins.d/` 生成可跑骨架；`check` 校验可执行/`--manifest`/iface/6 字段/`x-` 前缀/id 唯一；`ls` 列出已装能力 |
 
 > `start` 与 `run` 等价（兼容别名）。多实例归属靠"**端口 + DSH_HOME**"两个维度：
 > 同一 `DSH_HOME` 拒绝双开（会互相写 `workspace.json`/`settings`）；**同版本多开走 `rdsh debug`**。

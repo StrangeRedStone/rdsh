@@ -18,7 +18,11 @@ PLUGIN="${RDSH_DVD_PLUGIN:-}"
 if [ -z "$PLUGIN" ] && command -v rdsh >/dev/null 2>&1; then
   PLUGIN="$(rdsh base --json 2>/dev/null | jq -r '.manageRoot + "/plugins.d/rdsh-dvd.py"' 2>/dev/null || true)"
 fi
-[ -n "$PLUGIN" ] || PLUGIN="/home/srs/dsh/rdsh/plugins.d/rdsh-dvd.py"
+[ -n "$PLUGIN" ] || PLUGIN="$SELF_DIR/../plugins.d/rdsh-dvd.py"
+if [ ! -f "$PLUGIN" ]; then
+  echo "找不到 rdsh-dvd.py：用 --plugin <路径> 指定，或先 rdsh base 确认部署目录" >&2
+  exit 2
+fi
 RDSH_SH="$SELF_DIR/../Rdsh.sh"
 
 while [ $# -gt 0 ]; do

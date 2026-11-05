@@ -99,7 +99,7 @@
 #                                         #   发现通用/特化提供者 → plan 闸门 → 真迁移写日志；
 #                                         #   零交互，所有选择显式；不自动启动目标。
 #   rdsh fetch --list [--refresh]         # 列远端可用版本（GitHub API 列举 + 10 分钟缓存；失败回退 git ls-remote）
-#   rdsh fetch <版本> [--dir <名>] [--tarball] [--full] [--install] [--dry-run]
+#   rdsh fetch <版本> [--dir __NAME__] [--tarball] [--full] [--install] [--dry-run]
 #                                         # 拉取指定版本检出到 $BASE/dsh/（默认 git clone --depth 1，与官方源码装法一致，
 #                                         #   后续 rdsh patch export / 上游 diff 可用；--tarball 改走归档：更小更稳但无 .git）
 #   rdsh doctor [--only <维度,…>] [--json] [--quiet]
@@ -134,6 +134,8 @@
 #                                         #   默认只出计划；在跑的不许卸载；重装用 rdsh install
 #   rdsh plugins [子命令…]                # **插件维护**（转发 plugin-sync.sh）：status/sync/adopt 等；
 #                                         #   权威副本 $PLUGIN_ROOT，各版本 home 内是可覆盖副本
+#   rdsh plugin new|check|ls             # **外部能力脚手架**：new 生成可跑骨架；check 校验
+#                                         #   可执行/--manifest/iface/6 字段/x- 前缀/id 唯一；ls 列表
 #   rdsh scan --path <目录> | --staged [--repo <目录>] | --files <文件>...
 #                                         # **隐私守卫**（转发 scan-secrets.sh）：扫私钥/令牌/凭据文件/
 #                                         #   会话数据（error）与绝对家目录/邮箱/大文件（warn）；
@@ -1275,7 +1277,7 @@ debug_unlink_creds() {  # <home>
 cmd_debug_ls() {
   local ids; ids="$(debug_ids)"
   if [ -z "$ids" ]; then
-    log "还没有调试环境。新建：rdsh debug new <版本> --tag <名> [--assets] [--creds] [--start]"
+    log "还没有调试环境。新建：rdsh debug new <版本> --tag __NAME__ [--assets] [--creds] [--start]"
     return 0
   fi
   local id home ver created assets creds size port rows; rows="$(instances_live)"
@@ -2026,6 +2028,170 @@ cmd_uninstall() {
     log '以上为计划（默认 dry-run）。真卸载加 --apply。'
   fi
   [ "$failed" = "0" ] || { warn "$failed 个目标未卸载"; return 1; }
+}
+
+# ---------------- plugin：外部能力的脚手架与自检（2026-11-05，1.0.4） ----------------
+# 外部能力 = $RDSH_PLUGINS_DIR 下的**可执行文件**；自报家门靠 `<文件> --manifest`。
+# 这里补两件最常缺的：`plugin new`（可跑的最小骨架）与 `plugin check`（格式/可执行/接口/id 校验）。
+usage_plugin() { cat <<'USAGE'
+rdsh plugin —— 外部能力（plugins.d）的脚手架与自检
+
+用法:
+  rdsh plugin new __NAME__ [.sh|.py]   在 $RDSH_PLUGINS_DIR 生成可跑的最小骨架（默认 .sh）
+  rdsh plugin check [<文件>…]      校验：可执行 / --manifest / iface / 6 字段 / x- 前缀 / id 唯一
+  rdsh plugin ls                   列出已装外部能力（id/子命令/风险）
+
+约定（详见 docs/外部能力.md）:
+  `<文件> --manifest` 输出 `iface=1` + 若干行 `id|子命令|参数|风险|默认参数|简介`（正好 6 段）
+  id 必须 `x-` 前缀且跨所有能力唯一；风险 ∈ read|write|destructive
+  未知参数/失败退出码非 0；`--help` 打印用法
+USAGE
+}
+
+cmd_plugin_ls() {
+  local f out id sub risk
+  local n=0
+  echo "外部能力目录：$RDSH_PLUGINS_DIR"
+  for f in $(plugin_files); do
+    out="$(plugin_manifest_of "$f")"
+    while IFS='|' read -r id sub _args risk _def _sum; do
+      case "$id" in ''|'#'*|iface=*) continue ;; esac
+      n=$((n+1))
+      printf '  %-22s %-16s %-12s (%s)\n' "$id" "$sub" "$risk" "$(basename "$f")"
+    done <<< "$out"
+  done
+  [ "$n" -gt 0 ] || echo "  （空）"
+  printf '共 %s 个能力行。\n' "$n"
+}
+
+cmd_plugin_new() {
+  local name="${1:-}" ext="" f
+  [ -n "$name" ] || die '用法: rdsh plugin new __NAME__ [.sh|.py]'
+  case "$name" in
+    *[!A-Za-z0-9._-]*) die "名称只能含字母/数字/._-：$name" ;;
+  esac
+  case "$name" in
+    *.sh|*.py) : ;;
+    *) ext=".sh"; name="$name.sh" ;;
+  esac
+  local base="${name%.*}"
+  base="$(printf '%s' "$base" | tr -c 'A-Za-z0-9_-' '_')"
+  f="$RDSH_PLUGINS_DIR/$name"
+  [ -e "$f" ] && die "已存在：$f（换个名字，或先备份/移走）"
+  mkdir -p "$RDSH_PLUGINS_DIR"
+  if [ "$ext" = ".py" ]; then
+    cat > "$f" <<'PYTPL'
+#!/usr/bin/env python3
+"""__NAME__ —— rdsh 外部能力（由 `rdsh plugin new` 生成；改完用 `rdsh plugin check` 自检）"""
+import sys
+
+MANIFEST = """iface=1
+x-__NAME__|__NAME__||read||TODO：一句话简介（参数里不能出现竖线）
+"""
+
+
+def main(argv):
+    sub = argv[1] if len(argv) > 1 else ""
+    if sub == "--manifest":
+        print(MANIFEST, end="")
+        return 0
+    if sub in ("-h", "--help", ""):
+        print(__doc__)
+        return 0
+    if sub == "__NAME__":
+        print("TODO: 实现这里", file=sys.stderr)
+        return 2
+    print(f"未知参数：{sub}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+PYTPL
+  else
+    cat > "$f" <<'SHT'
+#!/usr/bin/env bash
+# __NAME__ —— rdsh 外部能力（由 `rdsh plugin new` 生成；改完用 `rdsh plugin check` 自检）
+# 约定：`--manifest` 打印 iface 与 6 字段能力行；`--help` 用法；未知参数非 0。
+set -euo pipefail
+case "${1:-}" in
+  --manifest)
+    cat <<'MANIFEST'
+iface=1
+x-__NAME__|__NAME__||read||TODO：一句话简介（参数里不能出现竖线）
+MANIFEST
+    ;;
+  -h|--help|'') sed -n '2,6p' "$0" ;;
+  __NAME__) shift; echo "TODO: 实现这里" >&2; exit 2 ;;
+  *) echo "未知参数：$1" >&2; exit 2 ;;
+esac
+SHT
+  fi
+  sed -i "s/__NAME__/$base/g" "$f"
+  chmod +x "$f"
+  log "已创建：$f"
+  printf '  下一步：\n  1) 编辑它：实现子命令、把能力名/子命令改成真名（id 用 x- 前缀）\n'
+  printf '  2) 自检：rdsh plugin check %s\n' "$f"
+  printf '  3) 全局：rdsh selfcheck && rdsh bridge --spec | grep %s\n' "$(basename "$name")"
+}
+
+cmd_plugin_check() {
+  local -a files=() ids=() problems=()
+  local f out row nf id rc total_rows=0 okfiles=0 failfiles=0
+  if [ $# -gt 0 ]; then files=("$@"); else
+    while IFS= read -r f; do [ -n "$f" ] && files+=("$f"); done < <(plugin_files)
+  fi
+  [ "${#files[@]}" -gt 0 ] || { echo "没有外部能力可查（$RDSH_PLUGINS_DIR 为空或不存在）"; return 0; }
+  for f in "${files[@]}"; do
+    local fbad=0 why=""
+    if [ ! -f "$f" ]; then echo "✗ 不存在：$f"; failfiles=$((failfiles+1)); continue; fi
+    out=""
+    if [ ! -x "$f" ]; then
+      fbad=1; why="$why 不可执行;"
+    else
+      out="$(timeout 10 "$f" --manifest 2>&1)"; rc=$?
+      if [ "$rc" != "0" ]; then fbad=1; why="$why --manifest rc=$rc;"; fi
+      if [ -z "$out" ]; then fbad=1; why="$why --manifest 无输出;"; fi
+    fi
+    # iface（可选，缺省 1）
+    local iv; iv="$(printf '%s\n' "$out" | sed -nE 's/^iface=([0-9]+)$/\1/p' | tail -1)"
+    [ -n "$iv" ] || iv=1
+    [ "$iv" = "$PLUGIN_IFACE_EXPECTED" ] || { fbad=1; why="$why iface=$iv（期望 $PLUGIN_IFACE_EXPECTED）;"; }
+    local n=0
+    while IFS= read -r row; do
+      case "$row" in ''|'#'*|iface=*) continue ;; esac
+      n=$((n+1)); total_rows=$((total_rows+1))
+      nf="$(printf '%s' "$row" | awk -F'|' '{print NF}')"
+      if [ "$nf" != "6" ]; then fbad=1; why="$why 行 ${n} 不是 6 字段（$nf）;"; continue; fi
+      id="${row%%|*}"
+      case "$id" in x-*) : ;; *) fbad=1; why="$why 行 ${n} id 无 x- 前缀（$id）;";; esac
+      local dup=0 x
+      for x in ${ids[@]+"${ids[@]}"}; do [ "$x" = "$id" ] && dup=1; done
+      if [ "$dup" = "1" ]; then fbad=1; why="$why 行 ${n} id 撞名（$id）;"; fi
+      ids+=("$id")
+    done <<< "$out"
+    if [ "$n" = "0" ]; then fbad=1; why="$why 没有任何能力行;"; fi
+    if [ "$fbad" = "0" ]; then
+      printf 'ok  %-26s %s 行\n' "$(basename "$f")" "$n"
+      okfiles=$((okfiles+1))
+    else
+      printf '✗   %-26s%s\n' "$(basename "$f")" "$why"
+      failfiles=$((failfiles+1))
+    fi
+  done
+  printf '\n检查 %s 个文件 / %s 个能力行；通过 %s / 未通过 %s\n' "${#files[@]}" "$total_rows" "$okfiles" "$failfiles"
+  [ "$failfiles" = "0" ] || return 1
+}
+
+cmd_plugin() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    new)    cmd_plugin_new "$@" ;;
+    check)  cmd_plugin_check "$@" ;;
+    ls|list) cmd_plugin_ls ;;
+    -h|--help|'') usage_plugin ;;
+    *) die "用法: rdsh plugin new __NAME__ | check [<文件>…] | ls（--help 看全）" ;;
+  esac
 }
 
 cmd_data() {
@@ -5783,7 +5949,7 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|plugins|selfupdate|self-update ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|plugins|plugin|selfupdate|self-update ) : ;;
     # restart 要能解析 --wake 的**目标**（要读 ENTRIES）；该组允许 0 条目，空环境照样跑
     restart ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
@@ -5805,6 +5971,7 @@ main() {
     install ) shift; cmd_install "$@" ;;
     uninstall ) shift; cmd_uninstall "$@" ;;
     plugins ) shift; forward_script "$MANAGE_ROOT/plugin-sync.sh" "$@" ;;
+    plugin ) shift; cmd_plugin "$@" ;;
     data ) shift; cmd_data "$@" ;;
     backup ) shift; cmd_backup "$@" ;;
     logs|log ) shift; cmd_logs "$@" ;;
