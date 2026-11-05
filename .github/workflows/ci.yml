@@ -135,6 +135,11 @@ jobs:
           set -e
           bash tools/smoke-roots.sh ./Rdsh.sh
 
+      - name: 安装 DVD 冒烟依赖（xorriso；runner 默认未装）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xorriso
+
       - name: 功能冒烟（rdsh dvd：DVD±R/RW 刻录计划与校验，隔离假工具）
         run: |
           set -e
