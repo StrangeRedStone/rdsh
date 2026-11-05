@@ -2,6 +2,24 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.3 — 2026-11-05
+
+> 主题：**install 的反面**（`rdsh uninstall`）+ 插件维护单入口（`rdsh plugins`）。
+
+### 新增
+
+- **`rdsh uninstall <目标…> [--dry-run|--apply]`**：只把 `node_modules` 与 `.installed` 移进回收站
+  （回到"未安装"态，可整体还原），**检出与数据 home 都不动**；默认只出计划（`--apply` 才动）；
+  在跑的实例拒绝卸载。与 `rdsh retire`（五类足迹）语义分开；重装用 `rdsh install`。
+- **`rdsh plugins [子命令…]`**：把插件维护包装成单入口（转发 `plugin-sync.sh`；权威副本 `$PLUGIN_ROOT`）。
+- 新冒烟 `tools/smoke-uninstall.sh`（18 项：dry-run 不动文件 / apply 移走两样且检出数据完好 /
+  回收站可还原 / 账本流水 / 幂等 / 在跑必拒 / `plugins` 转发）。
+
+### 验证
+
+- `smoke-uninstall` **18/0**；`selfcheck` 三份清单一致（help 32 / 派发 46 / 契约 17）；
+- 全套 CI 冒烟（隔离 HOME）全 0 失败。
+
 ## 1.0.2 — 2026-11-01
 
 > 主题：**端口归属不再两套口径**（9230 说"实例占用"、`stop 9230` 说"没有实例"）。

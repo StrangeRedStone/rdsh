@@ -128,6 +128,12 @@
 #                                         #   指向它们的**外部软链**/日志+注册表+.map+账本）逐项清点后
 #                                         #   **整体挪进同一个回收条目**（可整体还原）。默认只出计划；
 #                                         #   在跑的不许退役；回退基线或最后一版可用版本要 --force 并写明后果
+#   rdsh uninstall <目标…> [--dry-run|--apply]
+#                                         # **卸载**（install 的反面）：只把 node_modules 与 .installed
+#                                         #   移进回收站，回到"未安装"态；**检出与数据都不动**。
+#                                         #   默认只出计划；在跑的不许卸载；重装用 rdsh install
+#   rdsh plugins [子命令…]                # **插件维护**（转发 plugin-sync.sh）：status/sync/adopt 等；
+#                                         #   权威副本 $PLUGIN_ROOT，各版本 home 内是可覆盖副本
 #   rdsh scan --path <目录> | --staged [--repo <目录>] | --files <文件>...
 #                                         # **隐私守卫**（转发 scan-secrets.sh）：扫私钥/令牌/凭据文件/
 #                                         #   会话数据（error）与绝对家目录/邮箱/大文件（warn）；
@@ -1964,6 +1970,62 @@ cmd_install() {
   local entry; entry=$(resolve_target "$1")
   [[ "$entry" == UNMANAGED:* ]] && die '该检出未纳入管理，先运行: rdsh add <路径> --mode iso|link|body'
   ensure_built "$(entry_field "$entry" 2)"
+}
+
+# ---------------- uninstall：install 的反面（只退回"未安装"态） ----------------
+# 语义（2026-09-29 设计、2026-11-05 落地）：只把 **node_modules** 与 **.installed** 移进回收站，
+# 让检出回到"未安装"；**检出目录与数据 home 一律不动**。退役是 `rdsh retire`，两者别混。
+# 默认只出计划（--apply 才动）；在跑的实例不许卸载（写入者运行时不动它的东西）。
+cmd_uninstall() {
+  local apply=0 a t entry key ver dir data ports srcs nm ins failed=0
+  local -a targets=()
+  for a in "$@"; do
+    case "$a" in
+      --apply|--yes|-y) apply=1 ;;
+      --dry-run|-n)     apply=0 ;;
+      -*) die "未知选项：$a（rdsh uninstall <目标…> [--dry-run|--apply]）" ;;
+      *)  targets+=("$a") ;;
+    esac
+  done
+  [ "${#targets[@]}" -gt 0 ] || die '用法: rdsh uninstall <序号|版本|项目名|路径>... [--dry-run|--apply]'
+  for t in "${targets[@]}"; do
+    entry="$(resolve_target "$t")"
+    [[ "$entry" == UNMANAGED:* ]] && die "未纳入管理的路径不能卸载：${entry#UNMANAGED:}（先用 rdsh add 纳入，或手工处理）"
+    key="$(entry_key "$entry")"; ver="$(entry_field "$entry" 1)"
+    dir="$(entry_field "$entry" 2)"; data="$(entry_field "$entry" 4)"
+    echo
+    log "卸载评估：$key（版本 $ver）"
+    printf '  检出：%s\n' "$dir"
+    printf '  数据：%s（**不动**）\n' "$data"
+    ports="$(retire_live_ports "$dir" "$data")"
+    if [ -n "$ports" ]; then
+      warn "正在运行（端口 $ports）→ **拒绝卸载**。先停：rdsh stop --port $(printf '%s' "$ports" | awk '{print $1}')"
+      failed=$((failed+1)); continue
+    fi
+    nm="$dir/node_modules"; ins="$dir/.installed"
+    srcs=()
+    [ -e "$nm" ] && srcs+=("$nm")
+    [ -e "$ins" ] && srcs+=("$ins")
+    if [ "${#srcs[@]}" -eq 0 ]; then
+      log "  已经是未安装态（没有 node_modules / .installed），无需处理"
+      continue
+    fi
+    printf '  将移走：%s\n' "${srcs[*]}"
+    if [ "$apply" != "1" ]; then
+      log "  计划（未执行）：移进回收站；**检出与数据保持原样**。执行：rdsh uninstall $t --apply"
+      continue
+    fi
+    if ! trash_mv --label "uninstall-$key" --reason "uninstall $key：退回未安装态（检出与数据未动）" "${srcs[@]}"; then
+      warn "回收失败：$key"; failed=$((failed+1)); continue
+    fi
+    log "  已移进回收站：${TRASH_LAST_DEST:-（用 rdsh trash ls 查看）}"
+    state_journal uninstall "$key" "卸载：移走 node_modules/.installed（检出与数据未动）"
+    log "  完成。重新安装：rdsh install $t"
+  done
+  if [ "$apply" != "1" ]; then
+    log '以上为计划（默认 dry-run）。真卸载加 --apply。'
+  fi
+  [ "$failed" = "0" ] || { warn "$failed 个目标未卸载"; return 1; }
 }
 
 cmd_data() {
@@ -5721,11 +5783,11 @@ main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|selfupdate|self-update ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|plugins|selfupdate|self-update ) : ;;
     # restart 要能解析 --wake 的**目标**（要读 ENTRIES）；该组允许 0 条目，空环境照样跑
     restart ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
-    restore|retire|settings|setting ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
+    restore|retire|settings|setting|uninstall ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     wake ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     # selfupdate 更新的是**脚本自己**，不依赖任何 dsh 检出 —— 新机器上第一次就要能用（B10）
     selfupdate|self-update ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
@@ -5741,6 +5803,8 @@ main() {
     cd ) shift; cmd_cd "$@" ;;
     add ) shift; cmd_add "$@" ;;
     install ) shift; cmd_install "$@" ;;
+    uninstall ) shift; cmd_uninstall "$@" ;;
+    plugins ) shift; forward_script "$MANAGE_ROOT/plugin-sync.sh" "$@" ;;
     data ) shift; cmd_data "$@" ;;
     backup ) shift; cmd_backup "$@" ;;
     logs|log ) shift; cmd_logs "$@" ;;

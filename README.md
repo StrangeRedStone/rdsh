@@ -51,6 +51,7 @@
 | `rdsh exec <版本\|debug-id> -- <命令>` | 在指定环境里跑一次性命令（排障用） |
 | `rdsh add <检出路径>` | 把检出纳入管理 |
 | `rdsh install [版本]` | `pnpm install` + 构建 + 打标 |
+| `rdsh uninstall <目标…> [--dry-run\|--apply]` | **install 的反面**：只把 `node_modules` 与 `.installed` 移进回收站（回到"未安装"态，可整体还原），**检出与数据 home 都不动**。默认只出计划；在跑的拒绝；重装用 `rdsh install`。退役是 `rdsh retire`，两者别混 |
 | `rdsh data [-o] [版本]` | 显示 / 打开数据目录 |
 | `rdsh backup [<目标>\|--all] [--snapshot\|--full] [--state] [--verify] [--keep N]` | **本地**快照数据 home 与状态账本。`--snapshot` 用 `rsync --link-dest` 做**增量**（未变化的文件是硬链接，只存变化）；`--verify` 核查快照定稿后有没有被改过；`--keep N` 保留策略（超出的进回收站）；`--list` 列快照 |
 | `rdsh restore --list` / `--type <类> [--from <源>] [--file <路径>] [--diff] [--merge] [--yes]` | 从**本地快照 / 本地克隆 / 远端仓库**恢复。`data`/`state` **只认本地源**；凭据默认不恢复（`--with-creds`）；记忆三库默认**按条目追加**；覆盖前既有目标整体进回收站；收尾自动调 `doctor` |
@@ -76,6 +77,7 @@
 | `rdsh doctor [--only <维度,…>] [--json] [--quiet]` | **一键只读体检**（九个维度：检出 / 数据 home / 软链完整性 / 插件一致性 / 状态账本 / 实例 / 日志 / 磁盘内存 / 配置）。**必报"检查了几个对象"，总数为 0 时报 error**；退出码 `0` 无发现 / `1` 有 warn / `2` 有 error —— restore / retire / migrate 共用它 |
 | `rdsh state [list\|show\|role\|render\|sync\|journal\|--init]` | **状态账本（唯一权威）**：谁是什么角色（`current`/`baseline`/`retire-candidate`/`retired`）。权威是 `$BASE/.dsh-suite/state/versions.kv` + 只追加的 `journal.log`；各检出里的 `.installed` 是它的回声（KEY=VALUE），`回退基线.md` 是它的**生成视图** |
 | `rdsh patch …` | 转发到 `patch-manager.sh` |
+| `rdsh plugins [子命令…]` | **插件维护单入口**（转发 `plugin-sync.sh`）：`status`/`sync`/`adopt` 等；权威副本 `$PLUGIN_ROOT`，各版本 home 内是可覆盖副本 |
 
 > `start` 与 `run` 等价（兼容别名）。多实例归属靠"**端口 + DSH_HOME**"两个维度：
 > 同一 `DSH_HOME` 拒绝双开（会互相写 `workspace.json`/`settings`）；**同版本多开走 `rdsh debug`**。
