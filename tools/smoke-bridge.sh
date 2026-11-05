@@ -32,6 +32,7 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-backup" "$B/.dsh-suite/state" "$B/.dsh-suite/run/instances"
 cp -p "$SRC" "$B/dsh/Rdsh.sh"
 [ -f "$(dirname "$SRC")/doctor.sh" ] && cp -p "$(dirname "$SRC")/doctor.sh" "$B/dsh/doctor.sh"
+mkdir -p "$B/dsh/tools"; [ -f "$(dirname "$SRC")/tools/lib-roots.sh" ] && cp -p "$(dirname "$SRC")/tools/lib-roots.sh" "$B/dsh/tools/"
 # 一个假检出（让 list/du/state 有对象可看）
 D="$B/dsh/ck-1"; H="$B/.dsh/9.9.7-rc.2"
 mkdir -p "$D/node_modules" "$H/sessions"

@@ -2,6 +2,27 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.5 — 2026-11-05
+
+> 主题：**根解析收成一份共享库**（P1），附属脚本不再各抄一套。
+
+### 变更
+
+- 新增 `tools/lib-roots.sh`：BASE 与各派生根的**唯一共享实现**
+  （优先级 `BASE_OVERRIDE` > `RDSH_BASE` > 配置文件 > 默认；含经典 `$BASE/dsh` 回退与
+  脚本自身目录的可移植回退）。
+- `doctor.sh` / `migrate.sh` / `plugin-sync.sh` / `rdsh-restart.sh` / `patch-manager.sh`
+  改用共享库，删掉各自重复的 ~20 行解析块。
+- 主脚本 `Rdsh.sh` 新增 `rdsh_export_roots`，转发附属脚本前 export 已解析的根（子进程不必再解析）。
+- `tools/publish.sh` 白名单加入 `tools/lib-roots.sh`。
+- 新冒烟 `tools/smoke-roots.sh`（16 项：配置/环境覆盖/经典回退/可移植回退/与
+  `rdsh base --print-paths` 逐项一致/5 个脚本确实在用共享库）。
+
+### 验证
+
+- `smoke-roots` **16/0**；全量 19 份 CI 冒烟（隔离 HOME）全 0 失败；
+- `bash -n` 全过；隐私守卫 0 warn；shellcheck `-S error` 0 条。
+
 ## 1.0.4 — 2026-11-05
 
 > 主题：**外部能力的脚手架与自检**（`rdsh plugin new/check/ls`）。

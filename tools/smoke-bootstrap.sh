@@ -28,6 +28,7 @@ trap 'rm -rf "$T"' EXIT
 # 造一份"待装源"：只带够用的脚本 + 一个快冒烟（selfupdate 的校验会真跑它）
 SRC2="$T/src"; mkdir -p "$SRC2/tools"
 for f in bootstrap.sh Rdsh.sh doctor.sh scan-secrets.sh; do [ -f "$SRC/$f" ] && cp -p "$SRC/$f" "$SRC2/"; done
+mkdir -p "$SRC2/tools"; [ -f "$SRC/tools/lib-roots.sh" ] && cp -p "$SRC/tools/lib-roots.sh" "$SRC2/tools/"
 [ -f "$SRC/tools/smoke-bridge.sh" ] && cp -p "$SRC/tools/smoke-bridge.sh" "$SRC2/tools/"
 
 PASS=0; FAIL=0

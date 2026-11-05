@@ -65,23 +65,15 @@ log()  { printf '\033[1;34m[patch]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[patch!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[patch!]\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
 
-# ---- 基目录工具（与 rdsh 同一套解析）----
-RDSH_CONFIG="$HOME/.config/rdsh/config"
-cfg_get() {
-  [ -f "$RDSH_CONFIG" ] || return 0
-  sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$RDSH_CONFIG" | tail -1 \
-    | sed -E 's/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/'
-}
-expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
-BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
-# 补丁仓与备份根都可覆盖：命令行 --patches > 环境变量 > 配置文件 > $BASE 下的默认位置
-if [ -z "$PATCHES" ]; then
-  PATCHES="$(expand_tilde "${RDSH_PATCHES:-$(cfg_get PATCHES)}")"
-  [ -n "$PATCHES" ] || PATCHES="$BASE/.dsh-suite/patches"
-fi
+# ---- 基目录工具（共享库 tools/lib-roots.sh）----
+_self_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+. "$_self_dir/tools/lib-roots.sh"
+rdsh_resolve_roots
+cfg_get() { rdsh_cfg_get "$@"; }
+expand_tilde() { rdsh_expand "$@"; }
+PATCHES="${PATCHES:-$PATCHES_ROOT}"
 MANIFEST="$PATCHES/manifest.yaml"
-BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"
-[ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
+
 TS="$(date +%Y%m%d-%H%M%S)"
 
 command -v python3 >/dev/null || die "需要 python3 解析 manifest.yaml"

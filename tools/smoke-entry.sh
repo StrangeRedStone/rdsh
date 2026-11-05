@@ -26,6 +26,7 @@ T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh" "$B/.dsh" "$B/.dsh-suite/state"
 cp -p "$DOC" "$B/dsh/doctor.sh"
+mkdir -p "$B/dsh/tools"; cp -p "$(dirname "$(readlink -f "$DOC")")/tools/lib-roots.sh" "$B/dsh/tools/"
 [ -f "$(dirname "$DOC")/Rdsh.sh" ] && cp -p "$(dirname "$DOC")/Rdsh.sh" "$B/dsh/Rdsh.sh"
 
 PASS=0; FAIL=0

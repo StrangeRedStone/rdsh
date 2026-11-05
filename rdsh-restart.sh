@@ -57,23 +57,12 @@ die()  { printf '\033[1;31m[restart!]\033[0m %s\n' "$*" >&2; exit "${2:-1}"; }
 
 # ---- BASE / 日志目录：与 Rdsh.sh 同一套解析（env > ~/.config/rdsh/config > 默认）----
 RDSH_CONFIG="$HOME/.config/rdsh/config"
-cfg_get() {
-  [ -f "$RDSH_CONFIG" ] || return 0
-  sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$RDSH_CONFIG" | tail -1 \
-    | sed -E 's/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/'
-}
-expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
-BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
-LOG_DIR="$(expand_tilde "${DSH_RESTART_LOGDIR:-${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}}")"; [ -n "$LOG_DIR" ] || LOG_DIR="$BASE/.dsh-suite/logs"
-MANAGE_ROOT="$(expand_tilde "${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}")"
-if [ -z "$MANAGE_ROOT" ]; then
-  MANAGE_ROOT="$BASE/dsh"
-  # 可移植性回退：$BASE/dsh 不是本工具所在处时，改用本脚本所在目录
-  if [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
-    _self_dir="$(dirname "$SELF")"
-    if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
-  fi
-fi
+# 根解析：共享库（tools/lib-roots.sh）
+_self_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+. "$_self_dir/tools/lib-roots.sh"
+rdsh_resolve_roots
+cfg_get() { rdsh_cfg_get "$@"; }
+expand_tilde() { rdsh_expand "$@"; }
 RDSH_BIN="$MANAGE_ROOT/Rdsh.sh"
 
 # 注：日志落盘块**故意放在参数解析之后**（见下方"日志落盘"段）——

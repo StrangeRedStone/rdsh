@@ -38,6 +38,7 @@ mkdir -p "$B/rdsh/plugins.d" "$B/.dsh-suite/state" "$B/.dsh-suite/data" \
          "$B/.dsh-suite/shared/skills" "$B/.dsh-suite/shared/.agent-presets"
 cp -p "$SRC" "$B/rdsh/Rdsh.sh"
 cp -p "$HERE/../migrate.sh" "$B/rdsh/migrate.sh"
+mkdir -p "$B/rdsh/tools"; cp -p "$HERE/../tools/lib-roots.sh" "$B/rdsh/tools/"
 cp -p "$FRONT" "$B/rdsh/plugins.d/rdsh-migrate.sh"
 : > "$B/.dsh-suite/shared/lessons.md"; : > "$B/.dsh-suite/shared/AGENTS.md"
 : > "$B/.dsh-suite/shared/facts.md"; : > "$B/.dsh-suite/shared/backlog.md"

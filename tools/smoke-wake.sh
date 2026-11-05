@@ -35,6 +35,7 @@ eval "$(env -u RDSH_BASE -u RDSH_MANAGE_ROOT -u RDSH_DATA_ROOT -u RDSH_BACKUP_RO
         RDSH_CONFIG="$B/rdsh-config" RDSH_BASE="$B" bash "$B/dsh/Rdsh.sh" base --print-paths 2>/dev/null)"
 mkdir -p "$MANAGE_ROOT" "$DATA_ROOT" "$SHARED_ROOT" "$BACKUP_ROOT" "$LOG_DIR" 2>/dev/null || true
 [ -f "$(dirname "$SRC")/rdsh-restart.sh" ] && cp -p "$(dirname "$SRC")/rdsh-restart.sh" "$MANAGE_ROOT/"
+mkdir -p "$MANAGE_ROOT/tools"; [ -f "$(dirname "$SRC")/tools/lib-roots.sh" ] && cp -p "$(dirname "$SRC")/tools/lib-roots.sh" "$MANAGE_ROOT/tools/"
 D="$MANAGE_ROOT/ck-1"; H="$DATA_ROOT/9.9.7-rc.2"
 mkdir -p "$D" "$H"; printf '{"name":"deepseek-harness","version":"9.9.7-rc.2"}\n' > "$D/package.json"
 

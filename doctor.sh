@@ -22,34 +22,13 @@
 set -uo pipefail
 
 RDSH_CONFIG="${RDSH_CONFIG:-$HOME/.config/rdsh/config}"
-cfg_get() {
-  [ -f "$RDSH_CONFIG" ] || return 0
-  local v
-  v=$(sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$RDSH_CONFIG" | tail -1)
-  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-  case "$v" in "~") v="$HOME" ;; "~/"*) v="$HOME/${v#\~/}" ;; esac
-  printf '%s' "$v"
-}
-expand_tilde() { case "$1" in "~") printf '%s' "$HOME" ;; "~/"*) printf '%s' "$HOME/${1#\~/}" ;; *) printf '%s' "$1" ;; esac; }
-
-BASE="$(expand_tilde "${RDSH_BASE:-$(cfg_get BASE)}")"; [ -n "$BASE" ] || BASE="$HOME/Mapp"
-MANAGE_ROOT="$(expand_tilde "${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}")"
-if [ -z "$MANAGE_ROOT" ]; then
-  MANAGE_ROOT="$BASE/rdsh"
-  if [ ! -f "$MANAGE_ROOT/doctor.sh" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ] && [ -f "$BASE/dsh/Rdsh.sh" ]; then MANAGE_ROOT="$BASE/dsh"; fi
-  if [ ! -f "$MANAGE_ROOT/doctor.sh" ] && [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
-    _self="$(dirname "$(readlink -f "$0")")"
-    [ -f "$_self/doctor.sh" ] && MANAGE_ROOT="$_self"
-  fi
-fi
-DATA_ROOT="$(expand_tilde "${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}")";     [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh-suite/data"
-BACKUP_ROOT="$(expand_tilde "${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}")"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
-SHARED_ROOT="$(expand_tilde "${RDSH_SHARED_HOME:-$(cfg_get SHARED_ROOT)}")"; [ -n "$SHARED_ROOT" ] || SHARED_ROOT="$BASE/.dsh-suite/shared"
-PLUGIN_ROOT="$(expand_tilde "${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}")";  [ -n "$PLUGIN_ROOT" ] || PLUGIN_ROOT="$BASE/.dsh-suite/plugins"
-LOG_DIR="$(expand_tilde "${DSH_LOG_DIR:-$(cfg_get LOG_DIR)}")";           [ -n "$LOG_DIR" ]     || LOG_DIR="$BASE/.dsh-suite/logs"
-STATE_ROOT="$(expand_tilde "${RDSH_STATE_ROOT:-$(cfg_get STATE_ROOT)}")"; [ -n "$STATE_ROOT" ] || STATE_ROOT="$BASE/.dsh-suite/state"
-RUN_DIR="$(expand_tilde "${RDSH_RUN_DIR:-$(cfg_get RUN_DIR)}")";          [ -n "$RUN_DIR" ]     || RUN_DIR="$BASE/.dsh-suite/run"
-DEBUG_ROOT="$(expand_tilde "${RDSH_DEBUG_ROOT:-$(cfg_get DEBUG_ROOT)}")"; [ -n "$DEBUG_ROOT" ] || DEBUG_ROOT="$BASE/.dsh-suite/debug"
+# 根解析：共享库（tools/lib-roots.sh）；RDSH_CONFIG 需先定
+RDSH_CONFIG="${RDSH_CONFIG:-$HOME/.config/rdsh/config}"
+_self_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+. "$_self_dir/tools/lib-roots.sh"
+rdsh_resolve_roots
+cfg_get() { rdsh_cfg_get "$@"; }
+expand_tilde() { rdsh_expand "$@"; }
 STATE_KV="$STATE_ROOT/versions.kv"
 STATE_JOURNAL="$STATE_ROOT/journal.log"
 BASELINE_MD="$BACKUP_ROOT/回退基线.md"

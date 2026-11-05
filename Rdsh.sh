@@ -259,6 +259,11 @@ die()  { printf '\033[1;31m[rdsh!]\033[0m %s\n' "$*" >&2; exit 1; }
 # ---- 转发给附属脚本（统一入口）----
 # 为什么需要它：原来是裸 `exec "$MANAGE_ROOT/x.sh"`；脚本缺失时 bash 直接报
 # "没有那个文件或目录" + rc=127，分不清是 rdsh 的问题还是环境的问题（2026-10-08 调查发现）。
+rdsh_export_roots() {  # 把已解析的根交给子进程（附属脚本/外部能力不必再各解析一遍）
+  export RDSH_CONFIG RDSH_BASE BASE MANAGE_ROOT DATA_ROOT BACKUP_ROOT SHARED_ROOT \
+         LOG_DIR RUN_DIR STATE_ROOT TRASH_ROOT PLUGIN_ROOT PATCHES_ROOT DEBUG_ROOT
+}
+
 forward_script() {  # <脚本绝对路径> [参数…]
   local s="$1"; shift
   if [ ! -f "$s" ]; then
@@ -267,6 +272,7 @@ forward_script() {  # <脚本绝对路径> [参数…]
   排查：rdsh base（看根）、rdsh doctor（看环境）、确认该文件是否存在。"
   fi
   [ -x "$s" ] || die "附属脚本不可执行：$s（先执行 chmod +x \"$s\"）"
+  rdsh_export_roots
   exec "$s" "$@"
 }
 

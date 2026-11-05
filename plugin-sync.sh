@@ -32,14 +32,11 @@
 set -euo pipefail
 
 RDSH_CONFIG="${RDSH_CONFIG:-$HOME/.config/rdsh/config}"
-cfg_get() {
-  [ -f "$RDSH_CONFIG" ] || return 0
-  local v
-  v=$(sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*(.*)$/\1/p" "$RDSH_CONFIG" | tail -1)
-  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
-  case "$v" in "~") v="$HOME" ;; "~/"*) v="$HOME/${v#\~/}" ;; esac
-  printf '%s' "$v"
-}
+# 根解析：共享库（tools/lib-roots.sh）。先加载定义；参数解析后再解析根（--base 要用到）
+_self_dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+. "$_self_dir/tools/lib-roots.sh"
+cfg_get() { rdsh_cfg_get "$@"; }
+expand_tilde() { rdsh_expand "$@"; }
 
 MODE=""; TARGET=""; DRY=0; FORCE=0
 for a in "$@"; do
@@ -56,19 +53,8 @@ for a in "$@"; do
   esac
 done
 
-BASE="${BASE_OVERRIDE:-$(cfg_get BASE)}"; [ -n "$BASE" ] || BASE="${RDSH_BASE:-$HOME/Mapp}"
-MANAGE_ROOT="${RDSH_MANAGE_ROOT:-$(cfg_get MANAGE_ROOT)}"
-if [ -z "$MANAGE_ROOT" ]; then
-  MANAGE_ROOT="$BASE/dsh"
-  # 可移植性回退：$BASE/dsh 不是本工具所在处时，改用脚本自身目录（clone 到任意目录也能跑）
-  if [ ! -f "$MANAGE_ROOT/Rdsh.sh" ]; then
-    _self_dir="$(dirname "$(readlink -f "$0")")"
-    if [ -f "$_self_dir/Rdsh.sh" ]; then MANAGE_ROOT="$_self_dir"; fi
-  fi
-fi
-DATA_ROOT="${RDSH_DATA_ROOT:-$(cfg_get DATA_ROOT)}";       [ -n "$DATA_ROOT" ]   || DATA_ROOT="$BASE/.dsh-suite/data"
-BACKUP_ROOT="${RDSH_BACKUP_ROOT:-$(cfg_get BACKUP_ROOT)}"; [ -n "$BACKUP_ROOT" ] || BACKUP_ROOT="$BASE/.dsh-suite/backup"
-CANON="${RDSH_PLUGIN_ROOT:-$(cfg_get PLUGIN_ROOT)}";       [ -n "$CANON" ]       || CANON="$BASE/.dsh-suite/plugins"
+rdsh_resolve_roots
+CANON="${CANON:-$PLUGIN_ROOT}"
 
 log()  { printf '\033[1;34m[plugins]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[plugins!]\033[0m %s\n' "$*"; }

@@ -28,6 +28,7 @@ T="$(mktemp -d)"; B="$T/base"
 trap 'rm -rf "$T"' EXIT
 mkdir -p "$B/dsh"
 cp -p "$SRC" "$B/dsh/doctor.sh"
+mkdir -p "$B/dsh/tools"; cp -p "$(dirname "$(readlink -f "$SRC")")/tools/lib-roots.sh" "$B/dsh/tools/"
 
 # 夹具布局**从工具推导**（2026-10-12）：此前写死 "$B/dsh" + "$B/.dsh-*"，布局约定一改夹具就集体失配。
 cp -p "$RD_SH" "$B/dsh/Rdsh.sh"   # 自定位回退需要它与 doctor.sh 同处；--print-paths 也用它
