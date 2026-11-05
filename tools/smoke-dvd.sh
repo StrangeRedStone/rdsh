@@ -15,14 +15,6 @@ set -u
 
 SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 PLUGIN="${RDSH_DVD_PLUGIN:-}"
-if [ -z "$PLUGIN" ] && command -v rdsh >/dev/null 2>&1; then
-  PLUGIN="$(rdsh base --json 2>/dev/null | jq -r '.manageRoot + "/plugins.d/rdsh-dvd.py"' 2>/dev/null || true)"
-fi
-[ -n "$PLUGIN" ] || PLUGIN="$SELF_DIR/../plugins.d/rdsh-dvd.py"
-if [ ! -f "$PLUGIN" ]; then
-  echo "找不到 rdsh-dvd.py：用 --plugin <路径> 指定，或先 rdsh base 确认部署目录" >&2
-  exit 2
-fi
 RDSH_SH="$SELF_DIR/../Rdsh.sh"
 
 while [ $# -gt 0 ]; do
@@ -33,7 +25,12 @@ while [ $# -gt 0 ]; do
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
 done
-[ -f "$PLUGIN" ] || { echo "找不到插件：$PLUGIN" >&2; exit 2; }
+# 解析完参数再找插件（否则 `--help` 在没有插件文件的环境里会先 exit 2 —— CI 的 --help 冒烟就是这么红的）
+if [ -z "$PLUGIN" ] && command -v rdsh >/dev/null 2>&1; then
+  PLUGIN="$(rdsh base --json 2>/dev/null | jq -r '.manageRoot + "/plugins.d/rdsh-dvd.py"' 2>/dev/null || true)"
+fi
+[ -n "$PLUGIN" ] || PLUGIN="$SELF_DIR/../plugins.d/rdsh-dvd.py"
+[ -f "$PLUGIN" ] || { echo "找不到 rdsh-dvd.py：用 --plugin <路径> 指定，或先 rdsh base 确认部署目录" >&2; exit 2; }
 [ -f "$RDSH_SH" ] || { echo "找不到 Rdsh.sh：$RDSH_SH" >&2; exit 2; }
 
 T="$(mktemp -d "${TMPDIR:-/tmp}/smoke-dvd.XXXXXX")"
