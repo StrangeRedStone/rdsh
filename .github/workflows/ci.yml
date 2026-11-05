@@ -42,6 +42,11 @@ jobs:
           }
           echo "ok  可移植性回退生效"
 
+
+      - name: 命令表自检（help / 命令表 / 契约 三份清单一致 + 处理器存在）
+        run: |
+          set -e
+          bash ./Rdsh.sh selfcheck
       - name: 功能冒烟（隔离 BASE：state 状态账本）
         run: |
           set -e

@@ -5951,11 +5951,62 @@ if [ -n "${DSH_STOP_LOG:-}" ]; then
   log "（本次由 systemd 单元执行，日志：$DSH_STOP_LOG）"
 fi
 
+# ---------------- 命令表：派发/自检的唯一真源（2026-11-05 P1） ----------------
+# 每行: <名字|别名…>|<处理器>
+#   处理器: fn:<函数名>（先 shift 再调用） / fwd:<MANAGE_ROOT 下的脚本名>（转发）
+# 帮助散文仍是手写文档，但 selfcheck 会校验"每个主名都在 help 里"；
+# bridge 契约是"能力视图"（粒度更细，如 wake add），单独维护并校验首词属于本表。
+RD_CMDS="$(cat <<'CMDS'
+start|run|fn:cmd_start
+list|ls|fn:cmd_list
+status|fn:cmd_status
+stop|down|fn:cmd_stop
+debug|fn:cmd_debug
+exec|fn:cmd_exec
+cd|fn:cmd_cd
+add|fn:cmd_add
+install|fn:cmd_install
+uninstall|fn:cmd_uninstall
+plugins|fwd:plugin-sync.sh
+plugin|fn:cmd_plugin
+data|fn:cmd_data
+backup|fn:cmd_backup
+logs|log|fn:cmd_logs
+base|root|fn:cmd_base
+state|fn:cmd_state
+du|fn:cmd_du
+trash|trashcan|fn:cmd_trash
+restore|fn:cmd_restore
+retire|fn:cmd_retire
+settings|setting|fn:cmd_settings
+restart|fn:cmd_restart
+bridge|fn:cmd_bridge
+selfupdate|self-update|fn:cmd_selfupdate
+wake|fn:cmd_wake
+patch|fwd:patch-manager.sh
+doctor|fwd:doctor.sh
+scan|secrets|fwd:scan-secrets.sh
+fetch|download|dl|fn:cmd_fetch
+selfcheck|check|fn:cmd_selfcheck
+CMDS
+)"
+
+rd_cmd_resolve() {  # <命令> → 处理器写法（fn:… / fwd:…）；没有则 rc=1
+  local c="$1" row names spec
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    names="${row%|*}"      # 最后一个 | 之前 = 名字/别名
+    spec="${row##*|}"      # 最后一个 | 之后 = 处理器
+    case "|$names|" in *"|$c|"*) printf '%s' "$spec"; return 0 ;; esac
+  done <<< "$RD_CMDS"
+  return 1
+}
+
 main() {
   local cmd="${1:-start}"
   # 只有需要"检出清单"的子命令才去扫描；fetch/base/help 在空基目录下也要能跑
   case "$cmd" in
-    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|plugins|plugin|selfupdate|self-update ) : ;;
+    base|fetch|help|-h|--help|doctor|scan|secrets|bridge|plugins|plugin|selfcheck|check|selfupdate|self-update ) : ;;
     # restart 要能解析 --wake 的**目标**（要读 ENTRIES）；该组允许 0 条目，空环境照样跑
     restart ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     state|du|trash|trashcan ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
@@ -5965,42 +6016,26 @@ main() {
     selfupdate|self-update ) ALLOW_NO_ENTRIES=1; load_map; collect_entries; sort_entries ;;
     * ) load_map; collect_entries; sort_entries ;;
   esac
-  case "$cmd" in
-    ""|start|run ) shift || true; cmd_start "$@" ;;
-    list|ls ) cmd_list ;;
-    status ) cmd_status ;;
-    stop|down ) shift; cmd_stop "$@" ;;
-    debug ) shift; cmd_debug "$@" ;;
-    exec ) shift; cmd_exec "$@" ;;
-    cd ) shift; cmd_cd "$@" ;;
-    add ) shift; cmd_add "$@" ;;
-    install ) shift; cmd_install "$@" ;;
-    uninstall ) shift; cmd_uninstall "$@" ;;
-    plugins ) shift; forward_script "$MANAGE_ROOT/plugin-sync.sh" "$@" ;;
-    plugin ) shift; cmd_plugin "$@" ;;
-    data ) shift; cmd_data "$@" ;;
-    backup ) shift; cmd_backup "$@" ;;
-    logs|log ) shift; cmd_logs "$@" ;;
-    base|root ) shift; cmd_base "$@" ;;
-    state ) shift; cmd_state "$@" ;;
-    du ) shift; cmd_du "$@" ;;
-    trash|trashcan ) shift; cmd_trash "$@" ;;
-    restore ) shift; cmd_restore "$@" ;;
-    retire ) shift; cmd_retire "$@" ;;
-    settings|setting ) shift; cmd_settings "$@" ;;
-    restart ) shift; cmd_restart "$@" ;;
-    bridge ) shift; cmd_bridge "$@" ;;
-    selfupdate|self-update ) shift; cmd_selfupdate "$@" ;;
-    wake ) shift; cmd_wake "$@" ;;
-    patch ) shift; forward_script "$MANAGE_ROOT/patch-manager.sh" "$@" ;;   # 转发到补丁管理器   # 转发到补丁管理器
-    doctor ) shift; forward_script "$MANAGE_ROOT/doctor.sh" "$@" ;;   # 转发到只读体检         # 转发到只读体检
-    scan|secrets ) shift; forward_script "$MANAGE_ROOT/scan-secrets.sh" "$@" ;;   # 转发到隐私守卫  # 转发到隐私守卫
-    fetch|download|dl ) shift; cmd_fetch "$@" ;;
-    selfcheck|check ) shift; cmd_selfcheck "$@" ;;
-    help|-h|--help ) cmd_help ;;
-    --dry-run|-n ) cmd_start "$@" ;;
-    *) plugin_dispatch "$@" || cmd_start "$@" ;;   # 其余参数一律当作 start 的目标
-  esac
+  # 派发：RD_CMDS 是唯一真源；特殊形态先处理，其余查表
+  if [ -z "$cmd" ]; then
+    shift || true; cmd_start "$@"
+  elif [ "$cmd" = "--dry-run" ] || [ "$cmd" = "-n" ]; then
+    cmd_start "$@"
+  elif [ "$cmd" = "help" ] || [ "$cmd" = "-h" ] || [ "$cmd" = "--help" ]; then
+    cmd_help
+  else
+    local _spec
+    if _spec="$(rd_cmd_resolve "$cmd")"; then
+      shift || true
+      case "$_spec" in
+        fn:*)  "${_spec#fn:}" "$@" ;;
+        fwd:*) forward_script "$MANAGE_ROOT/${_spec#fwd:}" "$@" ;;
+        *)     die "命令表里 $cmd 的处理器写法非法：$_spec" ;;
+      esac
+    else
+      plugin_dispatch "$@" || cmd_start "$@"   # 其余参数一律当作 start 的目标
+    fi
+  fi
 }
 
 # ---------------- selfcheck：三份清单的一致性自检 ----------------
@@ -6012,39 +6047,49 @@ main() {
 #   error ② 契约表里有、派发里没有 → 契约撒谎（外部能力提供的子命令**算已派发**）
 #   info  ③ 派发里有、契约里没有   → 多数是"只给人用"的命令，正常
 cmd_selfcheck() {
-  local self="$SELF" lo hi
-  local help_list dispatch_list spec_list ext_list dispatch_all
-
-  help_list="$(sed -n '1,140p' "$self" | grep -oE '^#   rdsh [a-z][a-z0-9-]*' | awk '{print $3}' | sort -u)"
-  lo="$(grep -n '^  case "\$cmd" in' "$self" | tail -1 | cut -d: -f1)"
-  hi="$(awk -v s="$lo" 'NR>s && /^  esac$/{print NR; exit}' "$self")"
-  dispatch_list="$(sed -n "${lo},${hi}p" "$self" \
-    | sed -E 's/^    ""\|/    /' \
-    | grep -E '^    [a-z][a-z|_-]*[[:space:]]*\)' \
-    | sed -E 's/^    ([^)]*)\)[[:space:]]*.*/\1/' \
-    | tr '|' '\n' | tr -d ' ' | grep -v '^-' | grep . | sort -u)"
-  spec_list="$(bridge_spec_rows | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u)"
-  ext_list="$(plugin_rows | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u)"
-  dispatch_all="$(printf '%s\n%s\n' "$dispatch_list" "$ext_list" | grep . | sort -u)"
+  local help_list registry_all spec_list ext_list
+  help_list="$(sed -n '2,/^# =\{20,\}$/p' "$SELF" | grep -oE '^#   rdsh [a-z][a-z0-9-]*' | awk '{print $3}' | sort -u)"
+  # 命令表 → 全部名字/别名（去掉行尾的 |处理器）
+  registry_all="$(printf '%s\n' "$RD_CMDS" | sed 's/|[^|]*$//' | tr '|' '\n' | tr -d ' ' | grep . | sort -u)"
+  spec_list="$(bridge_spec_rows 2>/dev/null | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u || true)"
+  ext_list="$(plugin_rows 2>/dev/null | awk -F'|' '{print $2}' | awk '{print $1}' | grep . | sort -u || true)"
 
   local n_help n_disp n_spec
   n_help=$(printf '%s\n' "$help_list" | grep -c . || true)
-  n_disp=$(printf '%s\n' "$dispatch_all" | grep -c . || true)
+  n_disp=$(printf '%s\n' "$registry_all" | grep -c . || true)
   n_spec=$(printf '%s\n' "$spec_list" | grep -c . || true)
-  printf '[selfcheck] 三份清单：help %s 条 / 派发 %s 条 / 契约 %s 条\n' "$n_help" "$n_disp" "$n_spec"
+  printf '[selfcheck] 三份清单：help %s 条 / 命令表 %s 条 / 契约 %s 条\n' "$n_help" "$n_disp" "$n_spec"
   if [ "${n_help:-0}" -lt 5 ] || [ "${n_disp:-0}" -lt 5 ] || [ "${n_spec:-0}" -lt 5 ]; then
     printf '[selfcheck] [error] 有清单几乎为空（解析失败？）→ 自检**不成立**，不得当作通过\n' >&2
     return 2
   fi
 
-  local err=0 x
+  local err=0 row names spec primary x
   local -a e1=() e2=() only_human=()
-  for x in $help_list; do printf '%s\n' "$dispatch_all" | grep -qx "$x" || e1+=("$x"); done
-  for x in $spec_list; do printf '%s\n' "$dispatch_all" | grep -qx "$x" || e2+=("$x"); done
-  [ "${#e1[@]}" -gt 0 ] && { printf '[selfcheck] [error] help 里有、派发里没有（说明书撒谎）：%s\n' "${e1[*]}"; err=1; }
-  [ "${#e2[@]}" -gt 0 ] && { printf '[selfcheck] [error] 契约表里有、派发里没有（契约撒谎）：%s\n' "${e2[*]}"; err=1; }
-  for x in $dispatch_list; do printf '%s\n' "$spec_list" | grep -qx "$x" || only_human+=("$x"); done
-  printf '[selfcheck] [info] 派发里 %s 个命令未进契约表（多数是"只给人用"的，正常）：%s\n' \
+  # ① 命令表：处理器必须存在；主名必须在 help 里
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    names="${row%|*}"; spec="${row##*|}"
+    case "$spec" in
+      fn:*)  declare -F "${spec#fn:}" >/dev/null 2>&1 || { printf '[selfcheck] [error] 处理器未定义：%s → %s\n' "$names" "$spec"; err=1; } ;;
+      fwd:*) [ -f "$MANAGE_ROOT/${spec#fwd:}" ] || { printf '[selfcheck] [error] 转发目标不存在：%s → %s\n' "$names" "$spec"; err=1; } ;;
+      *)     printf '[selfcheck] [error] 非法处理器写法：%s → %s\n' "$names" "$spec"; err=1 ;;
+    esac
+    primary="${names%%|*}"
+    printf '%s\n' "$help_list" | grep -qx "$primary" || e1+=("$primary")
+  done <<< "$RD_CMDS"
+  # ② 契约首词必须能派发（内置命令表或外部能力）
+  for x in $spec_list; do
+    if printf '%s\n' "$registry_all" | grep -qx "$x" || printf '%s\n' "$ext_list" | grep -qx "$x"; then :; else e2+=("$x"); fi
+  done
+  [ "${#e1[@]}" -gt 0 ] && { printf '[selfcheck] [error] 命令表有、help 没写（说明书撒谎）：%s\n' "${e1[*]}"; err=1; }
+  [ "${#e2[@]}" -gt 0 ] && { printf '[selfcheck] [error] 契约表里有、命令表/外部能力里没有（契约撒谎）：%s\n' "${e2[*]}"; err=1; }
+
+  local x2
+  for x2 in $registry_all; do
+    printf '%s\n' "$spec_list" | grep -qx "$x2" || only_human+=("$x2")
+  done
+  printf '[selfcheck] [info] %s 个命令未进契约表（多数是"只给人用"的，正常）：%s\n' \
     "${#only_human[@]}" "${only_human[*]:-无}"
 
   local n_plugin; n_plugin="$(plugin_files | grep -c . || true)"
