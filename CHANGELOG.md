@@ -2,6 +2,23 @@
 
 本文件记录 rdsh 的显著变更。日期为实测/提交日期。
 
+## 1.0.7 — 2026-11-05
+
+> 主题：**附属能力入库**（`plugins.d/` 进主仓库，不再另开 rdsh-plugins 仓）。
+
+### 变更
+
+- `plugins.d/` 纳入主仓库：`rdsh-dvd.py`（DVD±R/RW 刻录）、`rdsh-migrate.sh`（迁移前门）、
+  `session-archive.sh`（会话档案库）、`README.md`。
+- `rdsh selfupdate` 的本体清单（`self_scripts` / `self_backup` / `self_install`）纳入 `plugins.d/*`，
+  部署目录与仓库同步；`tools/publish.sh` 白名单同样加入。
+- CI 新增 `smoke-dvd`（22 项）与 `smoke-migrate`（16 项）——此前因仓库缺外部能力文件而无法跑。
+- `session-archive.sh` 文件头示例去掉机器绝对路径（隐私守卫 W2 → 0）。
+
+### 验证
+
+- `smoke-dvd` 22/0；`smoke-migrate` 16/0；全量 CI 冒烟全绿；隐私守卫 63 文件 error 0 / warn 0。
+
 ## 1.0.6 — 2026-11-05
 
 > 主题：**三份清单收敛成一张命令表**（P1 最后一项）。

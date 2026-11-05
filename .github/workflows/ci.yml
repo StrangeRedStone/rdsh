@@ -135,6 +135,16 @@ jobs:
           set -e
           bash tools/smoke-roots.sh ./Rdsh.sh
 
+      - name: 功能冒烟（rdsh dvd：DVD±R/RW 刻录计划与校验，隔离假工具）
+        run: |
+          set -e
+          bash tools/smoke-dvd.sh
+
+      - name: 功能冒烟（rdsh migrate：迁移前门与计划，隔离 BASE）
+        run: |
+          set -e
+          bash tools/smoke-migrate.sh ./Rdsh.sh plugins.d/rdsh-migrate.sh
+
       - name: 文档路径表（机写校验：与 `rdsh base --print-paths` 真源逐字节一致）
         run: |
           set -e

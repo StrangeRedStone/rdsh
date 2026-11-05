@@ -5253,11 +5253,14 @@ self_scripts() {  # 本机 rdsh 的全部脚本（每行一个相对路径）
   [ -f "$MANAGE_ROOT/Rdsh.sh" ] && printf 'Rdsh.sh\n'
   for f in "$MANAGE_ROOT"/*.sh; do [ -f "$f" ] && printf '%s\n' "$(basename "$f")"; done | sort -u
   for f in "$MANAGE_ROOT"/tools/*.sh; do [ -f "$f" ] && printf 'tools/%s\n' "$(basename "$f")"; done | sort -u
+  for f in "$MANAGE_ROOT"/plugins.d/*.sh "$MANAGE_ROOT"/plugins.d/*.py "$MANAGE_ROOT"/plugins.d/README.md; do
+    [ -f "$f" ] && printf 'plugins.d/%s\n' "$(basename "$f")"
+  done
 }
 
 self_backup() {  # → stdout 备份目录
   local dir="$BACKUP_ROOT/dsh-scripts-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$dir/tools"
+  mkdir -p "$dir/tools" "$dir/plugins.d"
   local rel n=0
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
@@ -5311,16 +5314,17 @@ self_verify() {  # <源目录>：语法 + 隐私守卫 + 冒烟（全部在源�
 
 self_install() {  # <源目录>：原子替换（临时名 + mv）
   local src="$1" rel n=0
-  mkdir -p "$MANAGE_ROOT/tools"
+  mkdir -p "$MANAGE_ROOT/tools" "$MANAGE_ROOT/plugins.d"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     [ -f "$src/$rel" ] || continue
     cp -p "$src/$rel" "$MANAGE_ROOT/$rel.tmp.$$" || { warn "  写入失败：$rel"; return 1; }
     mv -f "$MANAGE_ROOT/$rel.tmp.$$" "$MANAGE_ROOT/$rel" || return 1
     n=$((n+1))
-  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh 2>/dev/null; ls -1 tools/*.sh 2>/dev/null; } | sort -u)
+  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh 2>/dev/null; ls -1 tools/*.sh 2>/dev/null; ls -1 plugins.d/*.sh plugins.d/*.py plugins.d/README.md 2>/dev/null; } | sort -u)
   chmod +x "$MANAGE_ROOT"/*.sh 2>/dev/null || true
   [ -d "$MANAGE_ROOT/tools" ] && chmod +x "$MANAGE_ROOT"/tools/*.sh 2>/dev/null || true
+  [ -d "$MANAGE_ROOT/plugins.d" ] && chmod +x "$MANAGE_ROOT"/plugins.d/*.sh "$MANAGE_ROOT"/plugins.d/*.py 2>/dev/null || true
   log "  已安装 $n 个脚本"
 }
 
