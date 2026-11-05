@@ -12,6 +12,7 @@
 | [patch-manager.sh.md](patch-manager.sh.md) | 上游补丁集 |
 | [rdsh-restart.sh.md](rdsh-restart.sh.md) | 重启 + 飞轮续转 |
 | [publish.sh.md](publish.sh.md) | 维护者：发布到仓库 |
+| [rdsh-dvd.py.md](rdsh-dvd.py.md) | 通用 DVD±R/RW 数据刻录 + rdsh 数据备份 |
 | [`../外部能力.md`](../外部能力.md) | 外部能力协议（`plugins.d/`） |
 | [`../应急启动.md`](../应急启动.md) | rdsh 坏了时的应急卡 |
 

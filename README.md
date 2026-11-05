@@ -313,3 +313,4 @@ rdsh start
 ## 来源
 
 脚本头部的日期即实测日期；全部逻辑来自一台长期运行的 DSH 工作机上的真实升级与故障处置。
+| [`plugins.d/rdsh-dvd.py`](docs/附属/rdsh-dvd.py.md) | 通用 DVD±R/RW 数据刻录 + rdsh 数据备份（默认 dry-run） | `rdsh dvd …` |
