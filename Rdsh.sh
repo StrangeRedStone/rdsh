@@ -5256,11 +5256,14 @@ self_scripts() {  # 本机 rdsh 的全部脚本（每行一个相对路径）
   for f in "$MANAGE_ROOT"/plugins.d/*.sh "$MANAGE_ROOT"/plugins.d/*.py "$MANAGE_ROOT"/plugins.d/README.md; do
     [ -f "$f" ] && printf 'plugins.d/%s\n' "$(basename "$f")"
   done
+  for f in "$MANAGE_ROOT"/tools/fixtures/*; do
+    [ -f "$f" ] && printf 'tools/fixtures/%s\n' "$(basename "$f")"
+  done
 }
 
 self_backup() {  # → stdout 备份目录
   local dir="$BACKUP_ROOT/dsh-scripts-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$dir/tools" "$dir/plugins.d"
+  mkdir -p "$dir/tools/fixtures" "$dir/plugins.d"
   local rel n=0
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
@@ -5276,6 +5279,7 @@ self_restore() {  # <备份目录>：把脚本还原回去（**这个函数只�
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     [ -f "$dir/$rel" ] || continue
+    mkdir -p "$(dirname "$MANAGE_ROOT/$rel")"
     cp -p "$dir/$rel" "$MANAGE_ROOT/$rel.tmp.$$" && mv -f "$MANAGE_ROOT/$rel.tmp.$$" "$MANAGE_ROOT/$rel" && n=$((n+1))
   done < <(self_scripts)
   [ -x "$MANAGE_ROOT/Rdsh.sh" ] || chmod +x "$MANAGE_ROOT/Rdsh.sh" 2>/dev/null || true
@@ -5299,12 +5303,21 @@ self_verify() {  # <源目录>：语法 + 隐私守卫 + 冒烟（全部在源�
   fi
   if [ "$QUICK" != "1" ] && [ -d "$src/tools" ]; then
     log '  校验 3/3：冒烟（隔离 BASE，逐个跑）'
-    local sm ran=0
+    local sm smn ran=0
     for sm in "$src"/tools/smoke-*.sh; do
       [ -f "$sm" ] || continue
-      case "$(basename "$sm")" in smoke-scan.sh) bash "$sm" "$src/scan-secrets.sh" >/dev/null 2>&1 || { warn "  冒烟失败：$(basename "$sm")"; return 1; } ;; esac
-      case "$(basename "$sm")" in smoke-scan.sh) ran=$((ran+1)); continue ;; esac
-      bash "$sm" "$src/Rdsh.sh" >/dev/null 2>&1 || { warn "  冒烟失败：$(basename "$sm")"; return 1; }
+      smn="$(basename "$sm")"
+      # 各冒烟的参数约定不同：绝大多数收 Rdsh.sh 路径；bootstrap 收**仓库目录**；
+      # dvd/migrate 收具名参数（2026-11-06 修：以前一律传 Rdsh.sh，bootstrap 必挂，
+      # 导致 `rdsh selfupdate` 的完整校验从 smoke-bootstrap 加入起就从来没通过过）。
+      case "$smn" in
+        smoke-scan.sh)    bash "$sm" "$src/scan-secrets.sh" >/dev/null 2>&1 ;;
+        smoke-bootstrap.sh) bash "$sm" "$src" >/dev/null 2>&1 ;;
+        smoke-doctor.sh|smoke-entry.sh) bash "$sm" "$src/doctor.sh" >/dev/null 2>&1 ;;
+        smoke-dvd.sh)     bash "$sm" --rdsh "$src/Rdsh.sh" --plugin "$src/plugins.d/rdsh-dvd.py" >/dev/null 2>&1 ;;
+        smoke-migrate.sh) bash "$sm" "$src/Rdsh.sh" "$src/plugins.d/rdsh-migrate.sh" >/dev/null 2>&1 ;;
+        *)                bash "$sm" "$src/Rdsh.sh" >/dev/null 2>&1 ;;
+      esac || { warn "  冒烟失败：$smn"; return 1; }
       ran=$((ran+1))
     done
     log "  冒烟通过 $ran 个"
@@ -5314,14 +5327,14 @@ self_verify() {  # <源目录>：语法 + 隐私守卫 + 冒烟（全部在源�
 
 self_install() {  # <源目录>：原子替换（临时名 + mv）
   local src="$1" rel n=0
-  mkdir -p "$MANAGE_ROOT/tools" "$MANAGE_ROOT/plugins.d"
+  mkdir -p "$MANAGE_ROOT/tools/fixtures" "$MANAGE_ROOT/plugins.d"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     [ -f "$src/$rel" ] || continue
     cp -p "$src/$rel" "$MANAGE_ROOT/$rel.tmp.$$" || { warn "  写入失败：$rel"; return 1; }
     mv -f "$MANAGE_ROOT/$rel.tmp.$$" "$MANAGE_ROOT/$rel" || return 1
     n=$((n+1))
-  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh 2>/dev/null; ls -1 tools/*.sh 2>/dev/null; ls -1 plugins.d/*.sh plugins.d/*.py plugins.d/README.md 2>/dev/null; } | sort -u)
+  done < <(cd "$src" && { printf 'Rdsh.sh\n'; ls -1 *.sh 2>/dev/null; ls -1 tools/*.sh 2>/dev/null; ls -1 plugins.d/*.sh plugins.d/*.py plugins.d/README.md 2>/dev/null; ls -1 tools/fixtures/* 2>/dev/null; } | sort -u)
   chmod +x "$MANAGE_ROOT"/*.sh 2>/dev/null || true
   [ -d "$MANAGE_ROOT/tools" ] && chmod +x "$MANAGE_ROOT"/tools/*.sh 2>/dev/null || true
   [ -d "$MANAGE_ROOT/plugins.d" ] && chmod +x "$MANAGE_ROOT"/plugins.d/*.sh "$MANAGE_ROOT"/plugins.d/*.py 2>/dev/null || true
@@ -5379,7 +5392,7 @@ cmd_selfupdate() {
   if [ "$DRY_RUN" = "1" ]; then
     echo "  [dry-run] 备份 → $BACKUP_ROOT/dsh-scripts-<ts>/"
     echo '  [dry-run] 校验：语法 + 隐私守卫 + 冒烟（--quick 只跑语法/守卫）'
-    echo "  [dry-run] 原子替换：$(cd "$src" && ls -1 *.sh tools/*.sh 2>/dev/null | wc -l) 个文件"
+    echo "  [dry-run] 原子替换：$(cd "$src" && ls -1 *.sh tools/*.sh tools/fixtures/* 2>/dev/null | wc -l) 个文件"
     echo '  [dry-run] 失败则从备份还原；成功记 state 流水'
     [ -n "$tmp" ] && rm -rf "$tmp"
     return 0
@@ -5427,7 +5440,7 @@ cmd_selfupdate() {
 }
 
 st_journal_soft() {  # 账本可用就记流水，不可用就跳过（不因账本坏了挡住自更新）
-  if [ -f "$STATE_KV" ] && command -v state_journal >/dev/null 2>&1; then state_journal "$1" "${2:-self}" "$3" 2>/dev/null || true; fi
+  if [ -f "$STATE_KV" ] && command -v state_journal >/dev/null 2>&1; then state_journal "$1" "${2:-self}" "${3:-}" 2>/dev/null || true; fi
   return 0
 }
 
