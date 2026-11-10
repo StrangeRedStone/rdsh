@@ -149,7 +149,14 @@ rc_is "$rc" 0 '整份携带 rc=0'
 has "$out" '无法做 schema 对照' '明确说无法做 schema 对照'
 [ -f "$OLD" ] && has "$(cat "$OLD")" 'new-only:' '整份内容都带过去了' || bad '整份携带没落地'
 
-echo '--- 8) 真机 settings 逐字节未变 ---'
+echo '--- 8) 0.2.x profile-scoped：无 settings.yaml 时明确指向 profile 配置 ---'
+PH="$DATA_ROOT/9.9.8-rc.1"; mkdir -p "$PH/profiles/web"; printf 'ui-theme:\n  mode: dark\n' > "$PH/profiles/web/cordis.patch.yml"
+out="$(run settings keys "$PH" 2>&1)"
+has "$out" 'profile-scoped' 'keys 指向 profile-scoped 配置'
+out="$(run settings carry "$PH" 9.9.7-rc.2 --dry-run 2>&1)"
+has "$out" 'profile-scoped' 'carry 对 0.2.x 源明确跳过'
+
+echo '--- 9) 真机 settings 逐字节未变 ---'
 [ "$REAL_BEFORE" = "$(sha256sum "$REAL"/*/settings.yaml 2>/dev/null || true)" ] && ok '真机 settings.yaml 未变' || bad '真机 settings.yaml 被改动'
 
 echo

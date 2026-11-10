@@ -4745,6 +4745,9 @@ cmd_restore() {
 settings_file_of() {  # <数据 home | settings.yaml 路径> → settings.yaml 路径
   case "$1" in */settings.yaml) printf '%s' "$1" ;; *) printf '%s/settings.yaml' "${1%/}" ;; esac
 }
+settings_profile_of() {  # <数据 home> → 0.2.x profile-scoped 配置文件
+  printf '%s/profiles/web/cordis.patch.yml' "${1%/}"
+}
 settings_home_of() {  # <版本|序号|目录|文件> → 数据 home
   local arg="$1" e
   case "$arg" in */settings.yaml) dirname "$arg"; return 0 ;; esac
@@ -4782,7 +4785,15 @@ settings_carry() {  # <源 home|文件> <目标 home|文件> [--dry-run]
   local src dst dry=0
   src="$(settings_file_of "$1")"; dst="$(settings_file_of "$2")"
   [ "${3:-}" = "--dry-run" ] && dry=1
-  [ -f "$src" ] || { warn "源没有 settings.yaml：$src（无事可做）"; return 0; }
+  if [ ! -f "$src" ]; then
+    local sp; sp="$(settings_profile_of "$(dirname "$src")")"
+    if [ -f "$sp" ]; then
+      warn "源是 0.2.x profile-scoped（$sp），没有 settings.yaml 可携带 → 跳过"
+    else
+      warn "源没有 settings.yaml：$src（无事可做）"
+    fi
+    return 0
+  fi
   if [ ! -f "$dst" ]; then
     if [ "$dry" = "1" ]; then printf '  [dry-run] 整份携带 %s → %s（目标还没有 settings.yaml，无法做 schema 对照）\n' "$src" "$dst"; return 0; fi
     cp -p "$src" "$dst"
@@ -4844,7 +4855,7 @@ cmd_settings() {
   case "$sub" in
     show|ls|list)
       local arg="${1:-}" k home file sha reg nk
-      log "settings.yaml 一览（每版本一份真文件；顶层键随 schema 变，所以不做稳定根软链）"
+      log "settings 一览（0.1.x：每版本一份 settings.yaml；0.2.x：profile-scoped，配置在 profiles/web/cordis.patch.yml）"
       local -a keys_sel=()
       if [ -n "$arg" ]; then
         local e; e="$(resolve_target "$arg" 2>/dev/null || true)"
@@ -4864,13 +4875,26 @@ cmd_settings() {
             "$([ -n "$reg" ] && { [ "$reg" = "$sha" ] && printf '  [与账本一致]' || printf '  [⚠️ 与账本不符：账本记 %s]' "$reg"; })"
           printf '      键：%s\n' "$(settings_keys "$file" | tr '\n' ' ')"
         else
-          printf '  %-18s %s（不存在）%s\n' "$k" "$file" "$([ -n "$reg" ] && printf '  [账本记 sha %s]' "$reg")"
+          local prof; prof="$(settings_profile_of "${home:-/nonexistent}")"
+          if [ -f "$prof" ]; then
+            printf '  %-18s %s（不存在）\n' "$k" "$file"
+            printf '      0.2.x profile-scoped：%s（%s 字节；配置在 profile，不再用 settings.yaml）\n' "$prof" "$(stat -c %s "$prof")"
+          else
+            printf '  %-18s %s（不存在）%s\n' "$k" "$file" "$([ -n "$reg" ] && printf '  [账本记 sha %s]' "$reg")"
+          fi
         fi
       done
       ;;
     keys)
-      local h; h="$(settings_home_of "${1:?用法: rdsh settings keys <版本|目录>}")"
-      settings_keys "$(settings_file_of "$h")" | sed 's/^/  /'
+      local h f prof; h="$(settings_home_of "${1:?用法: rdsh settings keys <版本|目录>}")"
+      f="$(settings_file_of "$h")"; prof="$(settings_profile_of "$h")"
+      if [ -f "$f" ]; then
+        settings_keys "$f" | sed 's/^/  /'
+      elif [ -f "$prof" ]; then
+        log "0.2.x profile-scoped：$prof（不是 settings.yaml，没有 settings 顶层键可列）"
+      else
+        warn "既没有 settings.yaml 也没有 $prof"
+      fi
       ;;
     carry)
       local s1="${1:-}" s2="${2:-}" dr=0
